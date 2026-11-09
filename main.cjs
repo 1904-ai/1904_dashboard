@@ -2,7 +2,7 @@ const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, n
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
 const { startUpdater } = require('./updater.cjs');
-const { SCHEME, taskUrl, readLink, startSignIn } = require('./desktop-links.cjs');
+const { SCHEME, IMPORT_PATH, taskUrl, repositorySetupUrl, readLink, startSignIn } = require('./desktop-links.cjs');
 const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
 
 const ORIGIN = 'https://1904.ai';
@@ -78,6 +78,12 @@ function openTask(target) {
 
 function beginBrowserSignIn() {
   signInAttempt = { ...startSignIn(ORIGIN), returnTo: loginReturnTo };
+function openRepositoryImport() {
+  loginReturnTo = IMPORT_PATH;
+  showDashboard();
+  loadPage(dashboardContents, ORIGIN + IMPORT_PATH);
+}
+
   openBrowser(signInAttempt.url);
 }
 
@@ -89,6 +95,10 @@ function handleLink(link) {
   }
   if (link.target) {
     openTask(link.target);
+  if (link.importRepository) {
+    openRepositoryImport();
+    return true;
+  }
     return true;
   }
   const attempt = signInAttempt;
@@ -148,7 +158,7 @@ function installNavigationRules(contents) {
     event.preventDefault();
     if (contents === dashboardContents && is1904(contents.getURL()) && (!event.initiator || is1904(event.initiator.url))) {
       const link = readLink(event.url, ORIGIN);
-      if (link?.target) { openTask(link.target); return; }
+      if (link?.target || link?.importRepository) { handleLink(link); return; }
     }
     const target = webUrl(event.url);
     if (!target || !is1904(contents.getURL())) return;
@@ -160,7 +170,14 @@ function installNavigationRules(contents) {
     openBrowser(target.href);
   });
   contents.on('will-redirect', (event) => {
-    if (!event.isMainFrame || is1904(event.url)) return;
+    if (!event.isMainFrame) return;
+    const setup = contents === dashboardContents && is1904(contents.getURL()) && repositorySetupUrl(event.url, ORIGIN);
+    if (setup) {
+      event.preventDefault();
+      openBrowser(setup.href);
+      return;
+    }
+    if (is1904(event.url)) return;
     event.preventDefault();
     const target = webUrl(event.url);
     if (target && contents === dashboardContents && SOCIAL_AUTH.has(target.origin + target.pathname)) {
@@ -207,7 +224,8 @@ function installPermissionRules() {
 }
 
 function offlinePage() {
-  const retry = (taskUrl(loginReturnTo, ORIGIN)?.href || AGENTS).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+  const retryUrl = loginReturnTo === IMPORT_PATH ? ORIGIN + IMPORT_PATH : taskUrl(loginReturnTo, ORIGIN)?.href || AGENTS;
+  const retry = retryUrl.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
   const html = `<!doctype html><html lang="en"><meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
     <meta name="viewport" content="width=device-width, initial-scale=1"><title>1904 Desktop</title>
@@ -220,7 +238,7 @@ function offlinePage() {
       p { line-height: 1.55; margin-bottom: 1.8rem; }
       a { color: Canvas; background: CanvasText; text-decoration: none; padding: .6rem 1rem; border-radius: .45rem; }
     </style><main><header>1904 DESKTOP</header><h1>Couldn’t reach 1904</h1>
-    <p>Check your connection, then reopen the Agents dashboard.</p><a href="${retry}">Try again</a></main></html>`;
+    <p>Check your connection, then try again.</p><a href="${retry}">Try again</a></main></html>`;
   return `data:text/html;base64,${Buffer.from(html).toString('base64')}`;
 }
 
@@ -399,6 +417,7 @@ function installMenu(updates) {
       { label: '1904 Website', click: () => openBrowser(`${ORIGIN}/`) },
       { label: 'Documentation', click: () => openBrowser(`${ORIGIN}/documentation`) },
       { label: 'Contact Support', click: () => openBrowser(`${ORIGIN}/contact`) },
+      { label: 'Import repository…', click: openRepositoryImport },
     ] },
   ]));
 }
