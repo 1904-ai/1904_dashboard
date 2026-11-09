@@ -425,6 +425,7 @@ function installMenu(updates) {
     ...(mac ? [{ role: 'appMenu' }] : []),
     { label: '1904', submenu: [
       { label: 'Open Agents', accelerator: 'CmdOrCtrl+Shift+A', click: () => { loginReturnTo = '/agents'; showDashboard(); loadPage(dashboardContents, AGENTS); } },
+      { label: 'Import repository…', click: openRepositoryImport },
       { label: 'Open Copied 1904 Link', accelerator: 'CmdOrCtrl+Shift+O', click: () => { showDashboard(); openCopiedLink(); } },
       { label: 'Sign In with Browser…', click: beginBrowserSignIn },
       { label: 'Open in Browser', click: () => openBrowser(AGENTS) },
@@ -454,7 +455,6 @@ function installMenu(updates) {
       { label: '1904 Website', click: () => openBrowser(`${ORIGIN}/`) },
       { label: 'Documentation', click: () => openBrowser(`${ORIGIN}/documentation`) },
       { label: 'Contact Support', click: () => openBrowser(`${ORIGIN}/contact`) },
-      { label: 'Import repository…', click: openRepositoryImport },
     ] },
   ]));
 }
