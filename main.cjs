@@ -245,11 +245,9 @@ function installChromeHandlers() {
     dashboardTheme = theme;
     syncTitleBar();
   });
-  ipcMain.on('1904:show-menu', (event, name) => {
+  ipcMain.on('1904:show-menu', (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) return;
-    const menu = Menu.getApplicationMenu();
-    if (name === 'help') menu?.getMenuItemById('1904-help')?.submenu?.popup({ window: mainWindow });
-    if (name === 'application') menu?.popup({ window: mainWindow });
+    Menu.getApplicationMenu()?.popup({ window: mainWindow });
   });
   ipcMain.handle('1904:task-notification', (event, item) => {
     if (event.sender !== dashboardContents || event.senderFrame !== event.sender.mainFrame ||
@@ -394,7 +392,7 @@ function installMenu(updates) {
       { role: 'togglefullscreen' },
     ] },
     { role: 'windowMenu' },
-    { id: '1904-help', role: 'help', label: 'Help', submenu: [
+    { role: 'help', label: 'Help', submenu: [
       { label: 'About 1904 Desktop', click: showAbout },
       { label: 'What’s New', click: showReleaseNotes },
       ...(updates ? [
