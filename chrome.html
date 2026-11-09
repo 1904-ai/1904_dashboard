@@ -8,15 +8,15 @@
     :root { color-scheme: dark; --canvas: #121416; --text: #e2e7ec; --line: #ffffff18; --hover: #ffffff14; }
     :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --text: #20262d; --line: #00000016; --hover: #0000000c; }
     body { margin: 0; background: var(--canvas); color: var(--text); font: 500 12px system-ui, sans-serif; overflow: hidden; }
-    header { box-sizing: border-box; height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 150px 0 12px;
+    header { box-sizing: border-box; height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 150px 0 12px;
       border-bottom: 1px solid var(--line); -webkit-app-region: drag; user-select: none; }
     :root[data-platform="darwin"] header { padding: 0 12px 0 82px; }
+    :root[data-task-title-bar] header { display: none; }
     header img { width: 16px; height: 16px; border-radius: 4px; }
     button { -webkit-app-region: no-drag; display: grid; place-items: center; width: 28px; height: 24px;
       padding: 0; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
     button:hover, button:focus-visible { background: var(--hover); }
     button:focus-visible { outline: 1px solid currentColor; outline-offset: 1px; }
-    #help-menu { width: auto; padding-inline: 8px; font: inherit; }
     @media (forced-colors: active) { header { border-color: CanvasText; } }
   </style>
 </head>
@@ -29,7 +29,6 @@
         <circle cx="3" cy="8" r="1.15"/><circle cx="8" cy="8" r="1.15"/><circle cx="13" cy="8" r="1.15"/>
       </svg>
     </button>
-    <button type="button" id="help-menu" aria-haspopup="menu">Help</button>
   </header>
 </body>
 </html>

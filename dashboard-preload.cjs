@@ -3,6 +3,11 @@ const { contextBridge, ipcRenderer } = require('electron');
 if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
   contextBridge.exposeInMainWorld('desktop1904', {
     notifyTask: item => ipcRenderer.invoke('1904:task-notification', item),
+    taskTitleBar: {
+      platform: process.platform === 'darwin' ? 'macos' : 'windows',
+      setActive: active => ipcRenderer.send('1904:task-title-bar', active),
+      showAppMenu: () => ipcRenderer.send('1904:task-title-bar-menu'),
+    },
   });
   ipcRenderer.on('1904:resume', () => window.dispatchEvent(new Event('shipt:retry-connection')));
   window.addEventListener('DOMContentLoaded', () => {

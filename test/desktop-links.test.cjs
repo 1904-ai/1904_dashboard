@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const { test } = require('node:test');
-const { readLink, startSignIn, taskUrl } = require('../desktop-links.cjs');
+const { readLink, repositorySetupUrl, startSignIn, taskUrl } = require('../desktop-links.cjs');
 
 const origin = 'https://1904.ai';
 const task = 'a'.repeat(32);
@@ -29,6 +29,30 @@ test('the desktop protocol applies the same task destination checks', () => {
   assert.deepEqual(readLink(deepLink(origin + taskPath), origin), { target: origin + taskPath });
   assert.equal(readLink(deepLink(`https://example.com${taskPath}`), origin), null);
   assert.equal(readLink(deepLink(origin + taskPath) + '#unexpected', origin), null);
+});
+
+test('repository import deep links open a fixed destination without parameters', () => {
+  assert.deepEqual(readLink('app-1904://import', origin), { importRepository: true });
+  for (const link of [
+    'app-1904://import/other',
+    'app-1904://import?url=https://example.com',
+    'app-1904://import#other',
+    'app-1904://user@import',
+  ]) assert.equal(readLink(link, origin), null, link);
+});
+
+test('only the signed-state setup URL can open the import handoff in the browser', () => {
+  const setup = 'payload.' + 's'.repeat(43);
+  const route = '/desktop/repository-import?setup=' + setup;
+  assert.equal(repositorySetupUrl(origin + route, origin).href, origin + route);
+  for (const url of [
+    'https://1904.ai.example.com' + route,
+    'https://user@1904.ai' + route,
+    origin + route + '&next=https://example.com',
+    origin + route + '#other',
+    origin + '/desktop/repository-import?github=connected',
+    origin + '/desktop/repository-import?setup=invalid',
+  ]) assert.equal(repositorySetupUrl(url, origin), null, url);
 });
 
 test('browser sign-in sends a challenge and accepts only well-formed callback tokens', () => {
