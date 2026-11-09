@@ -25,6 +25,9 @@
     "playwright": "1.63.0",
     "yaml": "2.9.1"
   },
+  "overrides": {
+    "app-builder-lib": { "@electron/notarize": "3.1.2" }
+  },
   "build": {
     "appId": "ai.1904.desktop",
     "artifactName": "1904-Desktop-${version}-${os}-${arch}.${ext}",
