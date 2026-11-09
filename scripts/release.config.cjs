@@ -15,14 +15,15 @@ function httpsSetting(name) {
 }
 
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Set a stable version before building this release');
+if (process.env.GITHUB_REF_TYPE === 'tag' && process.env.GITHUB_REF_NAME !== `v${version}`) {
+  throw new Error(`The release tag must match package.json (v${version})`);
+}
 
 const windows = process.platform === 'win32' && process.arch === 'x64';
 const mac = process.platform === 'darwin' && ['x64', 'arm64'].includes(process.arch);
 if (!windows && !mac) throw new Error('Use a native Windows x64, Intel Mac, or Apple Silicon Mac runner');
 
-const platform = windows ? 'win' : 'mac';
-const base = httpsSetting('DESKTOP_UPDATE_BASE_URL');
-const publish = { provider: 'generic', url: `${base}/${platform}/${process.arch}/` };
+const publish = { provider: 'github', owner: '1904-ai', repo: '1904_dashboard' };
 
 const config = { ...build, forceCodeSigning: true, publish };
 if (windows) {
