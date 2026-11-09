@@ -359,11 +359,7 @@ function showAbout() {
 function showReleaseNotes() {
   void dialog.showMessageBox(showDashboard(), {
     type: 'info', title: 'What’s New', message: `1904 Desktop ${app.getVersion()}`,
-    detail: [
-      'Open shared task links and complete browser sign-in in the app.',
-      'Click a task notification to bring the app forward and open the task.',
-      'The window remembers its position and fits smaller split-screen layouts.',
-    ].join('\n\n'),
+    detail: 'Open the title bar’s … menu and choose Help for version info, release notes, documentation, and support.',
     buttons: ['OK'],
   });
 }
