@@ -1,0 +1,41 @@
+{
+  "name": "1904-desktop",
+  "productName": "1904 Desktop",
+  "version": "0.3.0",
+  "description": "The 1904 Agents dashboard for Windows and macOS",
+  "author": "1904",
+  "private": true,
+  "homepage": "https://1904.ai/agents",
+  "main": "main.cjs",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.cjs && node --check desktop-links.cjs && node --check desktop-state.cjs && node --check updater.cjs && node --check chrome-preload.cjs && node --check dashboard-preload.cjs && node --check scripts/release.config.cjs && node --check scripts/verify-release.cjs && node --check scripts/smoke-release.cjs",
+    "build:windows": "electron-builder --win --x64 --publish never",
+    "build:mac": "electron-builder --mac --arm64 --x64 --publish never",
+    "release:build": "electron-builder --config scripts/release.config.cjs --publish never",
+    "release:verify": "node scripts/verify-release.cjs"
+  },
+  "dependencies": { "electron-updater": "6.8.11" },
+  "devDependencies": {
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0",
+    "playwright": "1.63.0",
+    "yaml": "2.9.1"
+  },
+  "build": {
+    "appId": "ai.1904.desktop",
+    "artifactName": "1904-Desktop-${version}-${os}-${arch}.${ext}",
+    "files": ["*.cjs", "chrome.html", "dashboard.css", "assets/icon.png", "package.json"],
+    "protocols": [{ "name": "1904 Desktop", "schemes": ["app-1904"] }],
+    "directories": { "output": "dist" },
+    "win": { "target": "nsis", "icon": "assets/icon.ico" },
+    "nsis": { "oneClick": false, "perMachine": false, "createDesktopShortcut": true },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "extendInfo": { "NSMicrophoneUsageDescription": "1904 uses your microphone when you dictate a message." }
+    }
+  }
+}

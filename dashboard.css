@@ -1,0 +1,12 @@
+/* Let the viewport hold the workspace and put overflow inside its individual panes. */
+.shipt-product .agents-beta2 :is(.beta2-tasklist, .beta2-activity, .beta2-evidence-body,
+  .beta2-chat-log, .beta2-overview-list, .beta2-status-cards) {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, currentColor 29%, transparent) transparent;
+  overscroll-behavior-y: contain;
+}
+
+@media (forced-colors: active) {
+  .shipt-product .agents-beta2 :is(.beta2-tasklist, .beta2-activity, .beta2-evidence-body,
+    .beta2-chat-log, .beta2-overview-list, .beta2-status-cards) { scrollbar-color: auto; }
+}
