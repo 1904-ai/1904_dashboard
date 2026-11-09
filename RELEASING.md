@@ -15,6 +15,8 @@ Keep signing secrets in the release environment. Public files and application so
 
 ## Build and roll out
 
+Browser sign-in, task notifications, saved views, and conversation search depend on the hosted dashboard. Verify the corresponding dashboard and sign-in routes before distributing a build that uses them.
+
 1. Set the release version in `package.json` and update `package-lock.json`. Run the workflow on the reviewed release ref. Wait for all three jobs to pass.
 2. Download the workflow artifacts and check `SHA256SUMS.txt`. Share each platform's actual `.exe` or `.zip`. The outer GitHub Actions artifact archive is for the release operator.
 3. On clean devices, install the signed build from its downloaded file and sign in to a test account. Open an Agents task and verify that the app keeps its session after restart. Exercise a signed N-to-N+1 update on every supported architecture before the first broad rollout. Preview builds require a one-time manual upgrade to the first signed release.

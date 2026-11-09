@@ -1,6 +1,12 @@
 # 1904 Desktop
 
-An Electron app for the live 1904 Agents dashboard. The 1904 service manages accounts, task workspaces, Git worktrees, conversations, and remote terminals. The desktop app opens `https://1904.ai/agents` in a dedicated browser profile.
+1904 Desktop brings the [1904 Agents dashboard](https://1904.ai/agents) to Windows and macOS. Open agent tasks, review changes, and get task notifications from an Electron app with a dedicated browser profile.
+
+The app connects to the hosted 1904 service. You need a 1904 account and an internet connection to use the dashboard. The service manages accounts, agent workspaces, Git worktrees, conversations, and remote terminals.
+
+## Install
+
+Check [GitHub Releases](https://github.com/1904-ai/1904/releases) for Windows x64, Apple Silicon, and Intel Mac downloads. You can also [build the app from source](#build-from-source).
 
 ## Sign in
 
@@ -12,15 +18,32 @@ The title bar follows the dashboard theme. Use **…** in the title bar to open 
 
 Use **Help → About 1904 Desktop** to see the installed version and **Help → What’s New** for release notes. Signed builds with an update feed show **Restart to Update** in Help when an update is ready.
 
-Browser sign-in, task notifications, saved views, and conversation search use the live 1904 control plane. Deploy the matching dashboard and sign-in routes before distributing this version.
-
 ## Build from source
 
-Install Node.js 22.12 or later. In this directory run `npm ci`, then `npm start` for development. Use `npm run check` for a syntax check.
+Install Node.js 22.12 or later, then run these commands in a terminal on Windows or macOS.
+
+```sh
+git clone https://github.com/1904-ai/1904.git
+cd 1904
+npm ci
+npm run check
+npm start
+```
 
 | Host | Command | Output |
 | --- | --- | --- |
 | Windows | `npm run build:windows` | Windows x64 installer in `dist/` |
 | macOS | `npm run build:mac` | macOS disk images for Apple Silicon and Intel in `dist/` |
 
-The commands above build previews. The project keeps earlier preview installers in `releases/`. See [Public releases](RELEASING.md) for signed builds, update hosting, and rollout.
+The build commands produce preview packages. See the [release guide](RELEASING.md) for signing, update hosting, and rollout, and the [changelog](CHANGELOG.md) for version history.
+
+## Get help and contribute
+
+- For account or hosted dashboard help, contact [1904 Support](https://1904.ai/contact).
+- For a desktop bug or feature request, open a [GitHub issue](https://github.com/1904-ai/1904/issues/new/choose).
+- For a vulnerability, follow the [security policy](SECURITY.md) to report it privately.
+- To submit a change, read the [contributing guide](CONTRIBUTING.md) and [code of conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+1904 Desktop source is available under the [MIT license](LICENSE).

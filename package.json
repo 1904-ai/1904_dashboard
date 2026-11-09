@@ -4,6 +4,7 @@
   "version": "0.3.0",
   "description": "The 1904 Agents dashboard for Windows and macOS",
   "author": "1904",
+  "license": "MIT",
   "private": true,
   "homepage": "https://1904.ai/agents",
   "main": "main.cjs",
@@ -26,7 +27,7 @@
   "build": {
     "appId": "ai.1904.desktop",
     "artifactName": "1904-Desktop-${version}-${os}-${arch}.${ext}",
-    "files": ["*.cjs", "chrome.html", "dashboard.css", "assets/icon.png", "package.json"],
+    "files": ["*.cjs", "chrome.html", "dashboard.css", "assets/icon.png", "package.json", "LICENSE"],
     "protocols": [{ "name": "1904 Desktop", "schemes": ["app-1904"] }],
     "directories": { "output": "dist" },
     "win": { "target": "nsis", "icon": "assets/icon.ico" },

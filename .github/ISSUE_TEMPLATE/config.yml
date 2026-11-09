@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Account and dashboard support
+    url: https://1904.ai/contact
+    about: Get help with your account or the hosted 1904 dashboard.
+  - name: Report a vulnerability privately
+    url: https://github.com/1904-ai/1904/blob/main/SECURITY.md
+    about: Follow the security policy to send a private report.

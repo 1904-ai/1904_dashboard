@@ -1,0 +1,17 @@
+name: Desktop feature request
+description: Suggest an improvement to 1904 Desktop
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the task and where the app gets in your way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help?
+      description: Describe the behavior you would like to see.
+    validations:
+      required: true

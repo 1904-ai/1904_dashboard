@@ -1,0 +1,30 @@
+name: Desktop bug
+description: Report a problem with the Windows or macOS app
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 1904 Desktop version
+      description: Find this under Help → About 1904 Desktop.
+      placeholder: 0.3.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: Windows 11 x64 or macOS 15 on Apple Silicon
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the steps, the result you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Additional details
+      description: Say whether the issue also occurs in a web browser if you checked. Redact private task content and credentials from logs or screenshots.
