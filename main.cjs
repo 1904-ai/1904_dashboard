@@ -76,14 +76,14 @@ function openTask(target) {
   loadPage(dashboardContents, task.href);
 }
 
-function beginBrowserSignIn() {
-  signInAttempt = { ...startSignIn(ORIGIN), returnTo: loginReturnTo };
 function openRepositoryImport() {
   loginReturnTo = IMPORT_PATH;
   showDashboard();
   loadPage(dashboardContents, ORIGIN + IMPORT_PATH);
 }
 
+function beginBrowserSignIn() {
+  signInAttempt = { ...startSignIn(ORIGIN), returnTo: loginReturnTo };
   openBrowser(signInAttempt.url);
 }
 
@@ -93,12 +93,12 @@ function handleLink(link) {
     queuedLink = link;
     return true;
   }
-  if (link.target) {
-    openTask(link.target);
   if (link.importRepository) {
     openRepositoryImport();
     return true;
   }
+  if (link.target) {
+    openTask(link.target);
     return true;
   }
   const attempt = signInAttempt;
