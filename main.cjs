@@ -2,14 +2,14 @@ const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, n
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
 const { startUpdater } = require('./updater.cjs');
-const { SCHEME, taskUrl, readLink, startSignIn } = require('./desktop-links.cjs');
+const { SCHEME, IMPORT_PATH, taskUrl, repositorySetupUrl, readLink, startSignIn } = require('./desktop-links.cjs');
 const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
 
 const ORIGIN = 'https://1904.ai';
 const AGENTS = `${ORIGIN}/agents`;
 const PARTITION = 'persist:1904-agents';
 const ICON = path.join(__dirname, 'assets', 'icon.png');
-const CHROME_HEIGHT = 36;
+const CHROME_HEIGHT = 44;
 const PALETTE = {
   dark: { color: '#121416', symbolColor: '#e2e7ec' },
   light: { color: '#f6f8fa', symbolColor: '#20262d' },
@@ -30,8 +30,10 @@ const SAFE_PREFERENCES = {
 const WINDOW_PREFERENCES = { ...SAFE_PREFERENCES, partition: PARTITION };
 
 let mainWindow;
+let dashboardView;
 let dashboardContents;
 let dashboardTheme;
+let taskTitleBar = false;
 let signInPromptOpen = false;
 let signInAttempt;
 let queuedLink;
@@ -76,6 +78,12 @@ function openTask(target) {
   loadPage(dashboardContents, task.href);
 }
 
+function openRepositoryImport() {
+  loginReturnTo = IMPORT_PATH;
+  showDashboard();
+  loadPage(dashboardContents, ORIGIN + IMPORT_PATH);
+}
+
 function beginBrowserSignIn() {
   signInAttempt = { ...startSignIn(ORIGIN), returnTo: loginReturnTo };
   openBrowser(signInAttempt.url);
@@ -85,6 +93,10 @@ function handleLink(link) {
   if (!link) return false;
   if (!desktopReady) {
     queuedLink = link;
+    return true;
+  }
+  if (link.importRepository) {
+    openRepositoryImport();
     return true;
   }
   if (link.target) {
@@ -148,7 +160,7 @@ function installNavigationRules(contents) {
     event.preventDefault();
     if (contents === dashboardContents && is1904(contents.getURL()) && (!event.initiator || is1904(event.initiator.url))) {
       const link = readLink(event.url, ORIGIN);
-      if (link?.target) { openTask(link.target); return; }
+      if (link?.target || link?.importRepository) { handleLink(link); return; }
     }
     const target = webUrl(event.url);
     if (!target || !is1904(contents.getURL())) return;
@@ -160,7 +172,14 @@ function installNavigationRules(contents) {
     openBrowser(target.href);
   });
   contents.on('will-redirect', (event) => {
-    if (!event.isMainFrame || is1904(event.url)) return;
+    if (!event.isMainFrame) return;
+    const setup = contents === dashboardContents && is1904(contents.getURL()) && repositorySetupUrl(event.url, ORIGIN);
+    if (setup) {
+      event.preventDefault();
+      openBrowser(setup.href);
+      return;
+    }
+    if (is1904(event.url)) return;
     event.preventDefault();
     const target = webUrl(event.url);
     if (target && contents === dashboardContents && SOCIAL_AUTH.has(target.origin + target.pathname)) {
@@ -207,7 +226,8 @@ function installPermissionRules() {
 }
 
 function offlinePage() {
-  const retry = (taskUrl(loginReturnTo, ORIGIN)?.href || AGENTS).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+  const retryUrl = loginReturnTo === IMPORT_PATH ? ORIGIN + IMPORT_PATH : taskUrl(loginReturnTo, ORIGIN)?.href || AGENTS;
+  const retry = retryUrl.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
   const html = `<!doctype html><html lang="en"><meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
     <meta name="viewport" content="width=device-width, initial-scale=1"><title>1904 Desktop</title>
@@ -220,7 +240,7 @@ function offlinePage() {
       p { line-height: 1.55; margin-bottom: 1.8rem; }
       a { color: Canvas; background: CanvasText; text-decoration: none; padding: .6rem 1rem; border-radius: .45rem; }
     </style><main><header>1904 DESKTOP</header><h1>Couldn’t reach 1904</h1>
-    <p>Check your connection, then reopen the Agents dashboard.</p><a href="${retry}">Try again</a></main></html>`;
+    <p>Check your connection, then try again.</p><a href="${retry}">Try again</a></main></html>`;
   return `data:text/html;base64,${Buffer.from(html).toString('base64')}`;
 }
 
@@ -235,6 +255,30 @@ function syncTitleBar() {
   mainWindow.setBackgroundColor(palette.color);
   if (process.platform !== 'darwin') mainWindow.setTitleBarOverlay({ ...palette, height: CHROME_HEIGHT });
   mainWindow.webContents.send('1904:chrome-theme', theme);
+  mainWindow.webContents.send('1904:chrome-task-title-bar', taskTitleBar);
+}
+
+function isTaskTitleBarPage(href) {
+  const url = webUrl(href);
+  return url?.origin === ORIGIN && ['/agents', '/agents-beta2'].includes(url.pathname);
+}
+
+function isTaskTitleBarSender(event) {
+  return mainWindow && event.sender === dashboardContents && event.senderFrame === event.sender.mainFrame &&
+    isTaskTitleBarPage(event.senderFrame?.url);
+}
+
+function setTaskTitleBar(active) {
+  if (!mainWindow || mainWindow.isDestroyed() || taskTitleBar === active) return;
+  taskTitleBar = active;
+  mainWindow.webContents.send('1904:chrome-task-title-bar', active);
+  sizeDashboard();
+}
+
+function sizeDashboard() {
+  const [width, height] = mainWindow.getContentSize();
+  const y = taskTitleBar ? 0 : CHROME_HEIGHT;
+  dashboardView.setBounds({ x: 0, y, width, height: Math.max(0, height - y) });
 }
 
 function installChromeHandlers() {
@@ -245,11 +289,16 @@ function installChromeHandlers() {
     dashboardTheme = theme;
     syncTitleBar();
   });
-  ipcMain.on('1904:show-menu', (event, name) => {
+  ipcMain.on('1904:show-menu', (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) return;
-    const menu = Menu.getApplicationMenu();
-    if (name === 'help') menu?.getMenuItemById('1904-help')?.submenu?.popup({ window: mainWindow });
-    if (name === 'application') menu?.popup({ window: mainWindow });
+    Menu.getApplicationMenu()?.popup({ window: mainWindow });
+  });
+  ipcMain.on('1904:task-title-bar', (event, active) => {
+    if (isTaskTitleBarSender(event) && typeof active === 'boolean') setTaskTitleBar(active);
+  });
+  ipcMain.on('1904:task-title-bar-menu', (event) => {
+    if (!taskTitleBar || !isTaskTitleBarSender(event)) return;
+    Menu.getApplicationMenu()?.popup({ window: mainWindow, x: process.platform === 'darwin' ? 82 : 12, y: CHROME_HEIGHT });
   });
   ipcMain.handle('1904:task-notification', (event, item) => {
     if (event.sender !== dashboardContents || event.senderFrame !== event.sender.mainFrame ||
@@ -288,7 +337,7 @@ function createWindow() {
     ...bounds,
     backgroundColor: palette.color,
     titleBarStyle: mac ? 'hiddenInset' : 'hidden',
-    ...(mac ? { trafficLightPosition: { x: 14, y: 11 } } : {
+    ...(mac ? { trafficLightPosition: { x: 14, y: 15 } } : {
       titleBarOverlay: { ...palette, height: CHROME_HEIGHT }, autoHideMenuBar: true,
     }),
     webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'chrome-preload.cjs') },
@@ -297,14 +346,11 @@ function createWindow() {
   const view = new WebContentsView({
     webPreferences: { ...WINDOW_PREFERENCES, preload: path.join(__dirname, 'dashboard-preload.cjs') },
   });
+  dashboardView = view;
   const contents = view.webContents;
   dashboardContents = contents;
   view.setBackgroundColor(palette.color);
   win.contentView.addChildView(view);
-  const sizeDashboard = () => {
-    const [width, height] = win.getContentSize();
-    view.setBounds({ x: 0, y: CHROME_HEIGHT, width, height: Math.max(0, height - CHROME_HEIGHT) });
-  };
   win.on('resize', sizeDashboard);
   sizeDashboard();
   if (saved.maximized === true) win.maximize();
@@ -314,19 +360,26 @@ function createWindow() {
     if (!contents.isDestroyed()) contents.close();
     if (mainWindow === win) {
       mainWindow = undefined;
+      dashboardView = undefined;
       dashboardContents = undefined;
       dashboardTheme = undefined;
+      taskTitleBar = false;
     }
   });
   win.webContents.on('dom-ready', syncTitleBar);
   void win.loadFile(path.join(__dirname, 'chrome.html'));
 
+  contents.on('did-navigate', () => setTaskTitleBar(false));
+  contents.on('did-navigate-in-page', () => {
+    if (!isTaskTitleBarPage(contents.getURL())) setTaskTitleBar(false);
+  });
   contents.on('dom-ready', () => {
     if (is1904(contents.getURL())) void contents.insertCSS(DASHBOARD_CSS).catch(() => {});
     if (win.isFocused()) contents.focus();
   });
   const showOffline = () => {
     if (contents.isDestroyed()) return;
+    setTaskTitleBar(false);
     dashboardTheme = undefined;
     syncTitleBar();
     void contents.loadURL(offlinePage()).catch(() => {});
@@ -361,11 +414,7 @@ function showAbout() {
 function showReleaseNotes() {
   void dialog.showMessageBox(showDashboard(), {
     type: 'info', title: 'What’s New', message: `1904 Desktop ${app.getVersion()}`,
-    detail: [
-      'Open shared task links and complete browser sign-in in the app.',
-      'Click a task notification to bring the app forward and open the task.',
-      'The window remembers its position and fits smaller split-screen layouts.',
-    ].join('\n\n'),
+    detail: 'Open the title bar’s … menu and choose Help for version info, release notes, documentation, and support.',
     buttons: ['OK'],
   });
 }
@@ -394,7 +443,7 @@ function installMenu(updates) {
       { role: 'togglefullscreen' },
     ] },
     { role: 'windowMenu' },
-    { id: '1904-help', role: 'help', label: 'Help', submenu: [
+    { role: 'help', label: 'Help', submenu: [
       { label: 'About 1904 Desktop', click: showAbout },
       { label: 'What’s New', click: showReleaseNotes },
       ...(updates ? [
@@ -405,6 +454,7 @@ function installMenu(updates) {
       { label: '1904 Website', click: () => openBrowser(`${ORIGIN}/`) },
       { label: 'Documentation', click: () => openBrowser(`${ORIGIN}/documentation`) },
       { label: 'Contact Support', click: () => openBrowser(`${ORIGIN}/contact`) },
+      { label: 'Import repository…', click: openRepositoryImport },
     ] },
   ]));
 }

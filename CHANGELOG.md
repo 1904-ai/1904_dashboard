@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Find Help in the title bar’s **…** menu, with version info, release notes, documentation, support, and update controls.
+
 ## 0.3.0
 
 - Sign in through your browser and return to 1904 Desktop.

@@ -1,7 +1,7 @@
 {
   "name": "1904-desktop",
   "productName": "1904 Desktop",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "The 1904 Agents dashboard for Windows and macOS",
   "author": "1904",
   "license": "MIT",
@@ -11,11 +11,12 @@
   "engines": { "node": ">=22.12.0" },
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.cjs && node --check desktop-links.cjs && node --check desktop-state.cjs && node --check updater.cjs && node --check chrome-preload.cjs && node --check dashboard-preload.cjs && node --check scripts/release.config.cjs && node --check scripts/verify-release.cjs && node --check scripts/smoke-release.cjs",
+    "check": "node --check main.cjs && node --check desktop-links.cjs && node --check desktop-state.cjs && node --check updater.cjs && node --check chrome-preload.cjs && node --check dashboard-preload.cjs && node --check scripts/release.config.cjs && node --check scripts/release-assets.cjs && node --check scripts/verify-release.cjs && node --check scripts/smoke-release.cjs",
     "build:windows": "electron-builder --win --x64 --publish never",
     "build:mac": "electron-builder --mac --arm64 --x64 --publish never",
     "release:build": "electron-builder --config scripts/release.config.cjs --publish never",
-    "release:verify": "node scripts/verify-release.cjs"
+    "release:verify": "node scripts/verify-release.cjs",
+    "release:assemble": "node scripts/release-assets.cjs"
   },
   "dependencies": { "electron-updater": "6.8.11" },
   "devDependencies": {

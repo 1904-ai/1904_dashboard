@@ -16,7 +16,7 @@ The app needs internet access. Use **View → Reload** to reconnect after a fail
 
 The title bar follows the dashboard theme. Use **…** in the title bar to open the application menu. The app restores its window size and position. The overview scrolls within the task list or status board, and F6 and Shift+F6 move focus between workspace panes.
 
-Use **Help → About 1904 Desktop** to see the installed version and **Help → What’s New** for release notes. Signed builds with an update feed show **Restart to Update** in Help when an update is ready.
+Open **… → Help** for the installed version, release notes, documentation, and support. Signed builds with an update feed show **Restart to Update** in Help when an update is ready.
 
 ## Build from source
 

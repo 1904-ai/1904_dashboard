@@ -1,6 +1,7 @@
 const { createHash, randomBytes } = require('node:crypto');
 
 const SCHEME = 'app-1904';
+const IMPORT_PATH = '/existing-app?desktop=1';
 const TOKEN = /^[a-f0-9]{64}$/;
 const token = () => randomBytes(32).toString('hex');
 
@@ -18,11 +19,25 @@ function taskUrl(value, origin) {
   }
 }
 
+function repositorySetupUrl(value, origin) {
+  if (typeof value !== 'string' || value.length > 2048) return null;
+  try {
+    const url = new URL(value);
+    if (url.origin !== origin || url.username || url.password || url.hash ||
+        url.pathname !== '/desktop/repository-import' ||
+        !/^\?setup=[\w-]+\.[\w-]{43}$/.test(url.search)) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
 function readLink(value, origin) {
   if (typeof value !== 'string' || !value.startsWith(SCHEME + '://') || value.length > 4096) return null;
   try {
     const url = new URL(value);
     if (url.username || url.password || url.port || url.hash || (url.pathname && url.pathname !== '/')) return null;
+    if (url.hostname === 'import' && !url.search) return { importRepository: true };
     if (url.hostname === 'task') {
       const target = taskUrl(url.searchParams.get('url'), origin);
       return target ? { target: target.href } : null;
@@ -42,4 +57,4 @@ function startSignIn(origin) {
   return { state, verifier, url: url.href, expiresAt: Date.now() + 15 * 60_000 };
 }
 
-module.exports = { SCHEME, taskUrl, readLink, startSignIn };
+module.exports = { SCHEME, IMPORT_PATH, taskUrl, repositorySetupUrl, readLink, startSignIn };
