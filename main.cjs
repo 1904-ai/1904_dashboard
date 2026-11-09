@@ -9,7 +9,7 @@ const ORIGIN = 'https://1904.ai';
 const AGENTS = `${ORIGIN}/agents`;
 const PARTITION = 'persist:1904-agents';
 const ICON = path.join(__dirname, 'assets', 'icon.png');
-const CHROME_HEIGHT = 36;
+const CHROME_HEIGHT = 44;
 const PALETTE = {
   dark: { color: '#121416', symbolColor: '#e2e7ec' },
   light: { color: '#f6f8fa', symbolColor: '#20262d' },
@@ -30,8 +30,10 @@ const SAFE_PREFERENCES = {
 const WINDOW_PREFERENCES = { ...SAFE_PREFERENCES, partition: PARTITION };
 
 let mainWindow;
+let dashboardView;
 let dashboardContents;
 let dashboardTheme;
+let taskTitleBar = false;
 let signInPromptOpen = false;
 let signInAttempt;
 let queuedLink;
@@ -253,6 +255,30 @@ function syncTitleBar() {
   mainWindow.setBackgroundColor(palette.color);
   if (process.platform !== 'darwin') mainWindow.setTitleBarOverlay({ ...palette, height: CHROME_HEIGHT });
   mainWindow.webContents.send('1904:chrome-theme', theme);
+  mainWindow.webContents.send('1904:chrome-task-title-bar', taskTitleBar);
+}
+
+function isTaskTitleBarPage(href) {
+  const url = webUrl(href);
+  return url?.origin === ORIGIN && ['/agents', '/agents-beta2'].includes(url.pathname);
+}
+
+function isTaskTitleBarSender(event) {
+  return mainWindow && event.sender === dashboardContents && event.senderFrame === event.sender.mainFrame &&
+    isTaskTitleBarPage(event.senderFrame?.url);
+}
+
+function setTaskTitleBar(active) {
+  if (!mainWindow || mainWindow.isDestroyed() || taskTitleBar === active) return;
+  taskTitleBar = active;
+  mainWindow.webContents.send('1904:chrome-task-title-bar', active);
+  sizeDashboard();
+}
+
+function sizeDashboard() {
+  const [width, height] = mainWindow.getContentSize();
+  const y = taskTitleBar ? 0 : CHROME_HEIGHT;
+  dashboardView.setBounds({ x: 0, y, width, height: Math.max(0, height - y) });
 }
 
 function installChromeHandlers() {
@@ -266,6 +292,13 @@ function installChromeHandlers() {
   ipcMain.on('1904:show-menu', (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) return;
     Menu.getApplicationMenu()?.popup({ window: mainWindow });
+  });
+  ipcMain.on('1904:task-title-bar', (event, active) => {
+    if (isTaskTitleBarSender(event) && typeof active === 'boolean') setTaskTitleBar(active);
+  });
+  ipcMain.on('1904:task-title-bar-menu', (event) => {
+    if (!taskTitleBar || !isTaskTitleBarSender(event)) return;
+    Menu.getApplicationMenu()?.popup({ window: mainWindow, x: process.platform === 'darwin' ? 82 : 12, y: CHROME_HEIGHT });
   });
   ipcMain.handle('1904:task-notification', (event, item) => {
     if (event.sender !== dashboardContents || event.senderFrame !== event.sender.mainFrame ||
@@ -304,7 +337,7 @@ function createWindow() {
     ...bounds,
     backgroundColor: palette.color,
     titleBarStyle: mac ? 'hiddenInset' : 'hidden',
-    ...(mac ? { trafficLightPosition: { x: 14, y: 11 } } : {
+    ...(mac ? { trafficLightPosition: { x: 14, y: 15 } } : {
       titleBarOverlay: { ...palette, height: CHROME_HEIGHT }, autoHideMenuBar: true,
     }),
     webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'chrome-preload.cjs') },
@@ -313,14 +346,11 @@ function createWindow() {
   const view = new WebContentsView({
     webPreferences: { ...WINDOW_PREFERENCES, preload: path.join(__dirname, 'dashboard-preload.cjs') },
   });
+  dashboardView = view;
   const contents = view.webContents;
   dashboardContents = contents;
   view.setBackgroundColor(palette.color);
   win.contentView.addChildView(view);
-  const sizeDashboard = () => {
-    const [width, height] = win.getContentSize();
-    view.setBounds({ x: 0, y: CHROME_HEIGHT, width, height: Math.max(0, height - CHROME_HEIGHT) });
-  };
   win.on('resize', sizeDashboard);
   sizeDashboard();
   if (saved.maximized === true) win.maximize();
@@ -330,19 +360,26 @@ function createWindow() {
     if (!contents.isDestroyed()) contents.close();
     if (mainWindow === win) {
       mainWindow = undefined;
+      dashboardView = undefined;
       dashboardContents = undefined;
       dashboardTheme = undefined;
+      taskTitleBar = false;
     }
   });
   win.webContents.on('dom-ready', syncTitleBar);
   void win.loadFile(path.join(__dirname, 'chrome.html'));
 
+  contents.on('did-navigate', () => setTaskTitleBar(false));
+  contents.on('did-navigate-in-page', () => {
+    if (!isTaskTitleBarPage(contents.getURL())) setTaskTitleBar(false);
+  });
   contents.on('dom-ready', () => {
     if (is1904(contents.getURL())) void contents.insertCSS(DASHBOARD_CSS).catch(() => {});
     if (win.isFocused()) contents.focus();
   });
   const showOffline = () => {
     if (contents.isDestroyed()) return;
+    setTaskTitleBar(false);
     dashboardTheme = undefined;
     syncTitleBar();
     void contents.loadURL(offlinePage()).catch(() => {});
