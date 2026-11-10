@@ -27,7 +27,6 @@ const publish = { provider: 'github', owner: '1904-ai', repo: '1904_dashboard' }
 
 const config = { ...build, forceCodeSigning: true, publish };
 if (windows) {
-  for (const name of ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET']) requireSetting(name);
   config.win = {
     ...build.win,
     verifyUpdateCodeSignature: true,
