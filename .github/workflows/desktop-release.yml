@@ -6,6 +6,11 @@ on:
       - 'v*.*.*'
       - '!v*-*'
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Verify only the Windows build
+        type: boolean
+        default: false
 
 concurrency:
   group: desktop-release
@@ -15,9 +20,54 @@ permissions:
   contents: read
 
 jobs:
-  desktop:
-    name: ${{ matrix.platform }}/${{ matrix.arch }}
+  windows:
+    name: win/x64
     if: github.repository == '1904-ai/1904_dashboard'
+    runs-on: windows-2025
+    environment: desktop-release
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - name: Log in to Azure with OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        env:
+          AZURE_CORE_OUTPUT: none
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Sign and verify Windows installer
+        shell: pwsh
+        env:
+          DESKTOP_WINDOWS_PUBLISHER: ${{ vars.DESKTOP_WINDOWS_PUBLISHER }}
+          DESKTOP_SIGNING_ENDPOINT: ${{ vars.DESKTOP_SIGNING_ENDPOINT }}
+          DESKTOP_SIGNING_ACCOUNT: ${{ vars.DESKTOP_SIGNING_ACCOUNT }}
+          DESKTOP_SIGNING_PROFILE: ${{ vars.DESKTOP_SIGNING_PROFILE }}
+        run: |
+          npm run release:build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run release:verify
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: 1904-desktop-win-x64
+          path: release-output/win/x64/
+          if-no-files-found: error
+          compression-level: 0
+
+  mac:
+    name: mac/${{ matrix.arch }}
+    if: github.repository == '1904-ai/1904_dashboard' && (github.event_name != 'workflow_dispatch' || !inputs.windows_only)
     runs-on: ${{ matrix.runner }}
     environment: desktop-release
     timeout-minutes: 60
@@ -25,14 +75,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: windows-2025
-            platform: win
-            arch: x64
           - runner: macos-15
-            platform: mac
             arch: arm64
           - runner: macos-15-intel
-            platform: mac
             arch: x64
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -44,23 +89,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - name: Sign and verify Windows installer
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          DESKTOP_WINDOWS_PUBLISHER: ${{ vars.DESKTOP_WINDOWS_PUBLISHER }}
-          DESKTOP_SIGNING_ENDPOINT: ${{ vars.DESKTOP_SIGNING_ENDPOINT }}
-          DESKTOP_SIGNING_ACCOUNT: ${{ vars.DESKTOP_SIGNING_ACCOUNT }}
-          DESKTOP_SIGNING_PROFILE: ${{ vars.DESKTOP_SIGNING_PROFILE }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-        run: |
-          npm run release:build
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run release:verify
       - name: Sign, notarize, and verify Mac app
-        if: runner.os == 'macOS'
         shell: bash
         env:
           CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
@@ -79,15 +108,15 @@ jobs:
           npm run release:verify
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: 1904-desktop-${{ matrix.platform }}-${{ matrix.arch }}
-          path: release-output/${{ matrix.platform }}/${{ matrix.arch }}/
+          name: 1904-desktop-mac-${{ matrix.arch }}
+          path: release-output/mac/${{ matrix.arch }}/
           if-no-files-found: error
           compression-level: 0
 
   publish:
     name: Publish the signed desktop release
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: desktop
+    needs: [windows, mac]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
