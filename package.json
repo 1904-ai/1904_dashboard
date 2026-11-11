@@ -1,7 +1,7 @@
 {
   "name": "1904-desktop",
   "productName": "1904 Desktop",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "The 1904 Agents dashboard for Windows and macOS",
   "author": "1904",
   "license": "MIT",
