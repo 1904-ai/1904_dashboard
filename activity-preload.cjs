@@ -3,7 +3,8 @@ const { ipcRenderer } = require('electron');
 // Computer Activity: renders what the main process reports. The page itself runs no script; this
 // preload fills it with textContent only, so command text and output are never parsed as HTML.
 // Commands, reasons and paths arrive already spelled out the way the prompt shows them.
-// It can stop a running command and change an app's folder. It cannot approve or start anything.
+// It can stop a running command, change an app's folder, end away mode and pause Use My Computer:
+// each of those only takes power away. It cannot approve or start anything.
 
 const OUTPUT_MAX = 64 * 1024;
 const STATUS = {
@@ -50,7 +51,13 @@ function approvalLine(run) {
   if (run.approval === 'once') return 'You allowed it once.';
   if (run.approval === 'allow') return 'You allowed it for this message.';
   if (run.approval === 'covered') return 'Allowed for this message, so it ran without asking again.';
+  if (run.approval === 'away') return 'Ran in away mode, without asking.';
   return '';
+}
+
+function accessLine(run) {
+  if (run.access === 'full') return 'Full access';
+  return run.network ? 'Sandbox, with internet' : 'Sandbox';
 }
 
 function appendOutput(card, stream, text) {
@@ -91,7 +98,8 @@ function createCard(run) {
     stop.disabled = true;
     ipcRenderer.send('1904:activity-stop', run.id);
   });
-  head.append(badge, title, meta, stop);
+  const access = node('span', 'access');
+  head.append(badge, title, meta, access, stop);
   const command = node('pre', 'command');
   const where = node('p', 'note');
   const reason = node('p', 'note');
@@ -101,7 +109,7 @@ function createCard(run) {
   output.setAttribute('aria-label', 'Output');
   const result = node('p', 'result');
   element.append(head, command, where, reason, approval, output, result);
-  const card = { element, badge, title, meta, stop, command, where, reason, approval, output, result, outputLength: 0 };
+  const card = { element, badge, title, meta, access, stop, command, where, reason, approval, output, result, outputLength: 0 };
   for (const segment of run.output || []) appendOutput(card, segment.stream, segment.text);
   return card;
 }
@@ -111,6 +119,8 @@ function updateCard(card, run) {
   card.badge.textContent = run.status === 'waiting' ? (run.asking ? 'Waiting for you' : 'Waiting in line') : STATUS[run.status] || run.status;
   card.title.textContent = run.task?.title || 'Task';
   card.meta.textContent = `${run.sender?.name || 'Someone'} · ${run.app?.name || 'App'}`;
+  card.access.textContent = accessLine(run);
+  card.access.toggleAttribute('data-full', run.access === 'full');
   card.stop.hidden = run.status !== 'running';
   if (run.status !== 'running') card.stop.disabled = false;
   card.command.textContent = run.command;
@@ -172,10 +182,67 @@ function renderFolders(folders) {
   document.getElementById('folders-empty').hidden = folders.length > 0;
 }
 
+let awayShown;
+
+function renderAway(leases) {
+  const key = JSON.stringify(leases);
+  if (key === awayShown) return;
+  awayShown = key;
+  document.getElementById('away-section').hidden = leases.length === 0;
+  document.getElementById('away').replaceChildren(...leases.map(lease => {
+    const item = node('li', 'away');
+    const until = new Date(lease.endsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const end = node('button', '', 'End away mode');
+    end.type = 'button';
+    end.addEventListener('click', () => {
+      end.disabled = true;
+      ipcRenderer.send('1904:activity-end-away', lease.id);
+    });
+    item.append(node('span', 'away-title', lease.taskTitle),
+      node('span', 'away-detail', `Until ${until} · ${lease.commandsLeft} commands left · ${lease.network ? 'with internet' : 'no internet'}`), end);
+    return item;
+  }));
+}
+
+let historyShown;
+// Older output arrives once, with the window's first full snapshot; later updates list the commands only.
+const historyOutput = new Map();
+
+// Earlier commands from this computer's own log. Rebuilt only when the list changed.
+function renderHistory(history) {
+  if (!history) return;
+  for (const run of history) if (run.output) historyOutput.set(run.id, run.output);
+  const key = JSON.stringify(history.map(run => [run.id, run.status]));
+  if (key === historyShown) return;
+  historyShown = key;
+  document.getElementById('history-section').hidden = history.length === 0;
+  document.getElementById('history').replaceChildren(...history.map(run => {
+    const card = createCard({ ...run, output: [] });
+    updateCard(card, run);
+    card.stop.remove();
+    card.output.remove();
+    const output = historyOutput.get(run.id);
+    if (output?.length) {
+      const more = node('details');
+      more.append(node('summary', '', 'Output'), card.output);
+      for (const segment of output) appendOutput(card, segment.stream, segment.text);
+      card.element.insertBefore(more, card.result);
+    }
+    return card.element;
+  }));
+}
+
 function render(state) {
   if (!state) return;
   document.getElementById('connection').textContent = state.connection?.text || '';
+  const pause = document.getElementById('pause');
+  pause.hidden = !state.connection?.connected;
+  pause.textContent = state.connection?.paused ? 'Resume' : 'Pause';
+  pause.title = state.connection?.paused ? 'Take requests from 1904 again' : 'Stop taking requests from 1904 until you resume';
+  pause.dataset.paused = state.connection?.paused ? 'true' : 'false';
+  renderAway(state.away || []);
   renderRuns(state.runs || []);
+  renderHistory(state.history);
   renderFolders(state.folders || []);
 }
 
@@ -201,6 +268,8 @@ ipcRenderer.on('1904:activity-output', (_event, batch) => {
 });
 
 window.addEventListener('DOMContentLoaded', async () => {
+  const pause = document.getElementById('pause');
+  pause.addEventListener('click', () => ipcRenderer.send('1904:activity-pause', pause.dataset.paused !== 'true'));
   const state = await ipcRenderer.invoke('1904:activity-snapshot');
   snapshotSeq = Number.isInteger(state?.seq) ? state.seq : -1;
   ready = true;

@@ -1,7 +1,7 @@
-const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, screen, session, shell } = require('electron');
+const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, screen, session, shell, systemPreferences } = require('electron');
 const { spawn } = require('node:child_process');
-const { existsSync, readFileSync } = require('node:fs');
-const { mkdir, stat } = require('node:fs/promises');
+const { existsSync, readFileSync, realpathSync } = require('node:fs');
+const { mkdir, mkdtemp, realpath, rm, stat } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { fileURLToPath } = require('node:url');
@@ -13,7 +13,10 @@ const { installContextMenu } = require('./context-menu.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
 const { createComputerBridge } = require('./computer-bridge.cjs');
-const { createDialogAsk } = require('./computer-approval.cjs');
+const { createDialogAsk, fullAccessConfirmation } = require('./computer-approval.cjs');
+const computerProof = require('./computer-proof.cjs');
+const { awayBudgetPrompt, awayConfirmPrompt, awayDurationPrompt, createAwayLeases } = require('./computer-away.cjs');
+const { createActivityLog } = require('./computer-log.cjs');
 
 const ORIGIN = 'https://1904.ai';
 const AGENTS = `${ORIGIN}/agents`;
@@ -72,6 +75,12 @@ let activityOutputTimer;
 let activityOutputSeq = 0;
 const activityOutput = [];
 const computerNotices = new Set();
+let computerMessages;
+let computerLog;
+// webRequest id → the proof header for a message the dashboard is sending (see stampMessage).
+const pendingProofs = new Map();
+// The person's last real key press or click in the dashboard window: a message is stamped only right after one.
+const computerInput = computerProof.createInputTracker();
 
 function webUrl(value) {
   try {
@@ -286,10 +295,49 @@ function installNavigationRules(contents) {
   });
 }
 
+// Use My Computer, the origin rule: a request reaching the dashboard's own session from its own main frame.
+function fromDashboard(details) {
+  const frame = details.frame;
+  const main = dashboardContents?.mainFrame;
+  // Without a frame it cannot be shown to come from the dashboard's main frame: no.
+  return Boolean(dashboardContents) && !dashboardContents.isDestroyed() && details.webContentsId === dashboardContents.id &&
+    is1904(dashboardContents.getURL()) && details.initiatorOrigin === ORIGIN &&
+    Boolean(frame && main && frame.processId === main.processId && frame.routingId === main.routingId);
+}
+
+// A message the person sends from this window gets a proof only this process can make. The proof
+// covers the exact bytes sent; the header is added in onBeforeSendHeaders, after the page let go.
+async function stampMessage(profile, details) {
+  if (!computerLink?.info() || !computerProof.stampableRequest({ method: details.method, url: details.url, origin: ORIGIN }) || !fromDashboard(details)) return;
+  try {
+    const body = await computerProof.uploadBody(details.uploadData, id => profile.getBlobData(id));
+    const message = body && computerProof.messageInBody(body);
+    if (!message) return;
+    // A message the page sent with no key press or click just before is not the person's: it leaves unstamped.
+    const decision = computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && dashboardContents.isFocused() });
+    if (!decision.stamp) {
+      computerLog?.note({ text: decision.reason, messageId: message.messageId, taskId: message.taskId });
+      return;
+    }
+    const keys = await computerLink.proof();
+    if (!keys) return;
+    const now = Date.now();
+    for (const [id, entry] of pendingProofs) if (now - entry.at > 60_000) pendingProofs.delete(id);
+    pendingProofs.set(details.id, { header: computerProof.proofHeader({ ...keys, ms: now, body }), message, at: now });
+  } catch {
+    // An unstamped message simply cannot use this computer.
+  }
+}
+
 function installPermissionRules() {
   const profile = session.fromPartition(PARTITION);
-  profile.webRequest.onBeforeRequest({ urls: [`${ORIGIN}/login*`] }, (details, callback) => {
+  // One listener per event and session: the sign-in redirect and the message proof share it.
+  profile.webRequest.onBeforeRequest({ urls: [`${ORIGIN}/login*`, `${ORIGIN}/api/apps/*`] }, (details, callback) => {
     const url = new URL(details.url);
+    if (url.pathname.startsWith('/api/')) {
+      void stampMessage(profile, details).finally(() => callback({}));
+      return;
+    }
     if (details.resourceType === 'mainFrame' && details.method === 'GET' &&
         url.pathname === '/login' && !url.searchParams.has('returnTo')) {
       url.searchParams.set('returnTo', loginReturnTo);
@@ -297,6 +345,17 @@ function installPermissionRules() {
     } else {
       callback({});
     }
+  });
+  // No page can send a proof of its own; only a message stamped above leaves with one.
+  profile.webRequest.onBeforeSendHeaders({ urls: [`${ORIGIN}/*`] }, (details, callback) => {
+    const requestHeaders = computerProof.withoutProof(details.requestHeaders);
+    const proof = pendingProofs.get(details.id);
+    pendingProofs.delete(details.id);
+    if (proof && fromDashboard(details)) {
+      requestHeaders[computerPolicy.COMPUTER_PROOF_HEADER] = proof.header;
+      computerMessages?.record(proof.message.messageId, proof.message.taskId);
+    }
+    callback({ requestHeaders });
   });
   profile.webRequest.onHeadersReceived({ urls: [`${ORIGIN}/*`], types: ['mainFrame'] }, (details, callback) => {
     if (details.webContentsId === dashboardContents?.id) {
@@ -430,6 +489,9 @@ function createWindow() {
   dashboardView = view;
   const contents = view.webContents;
   dashboardContents = contents;
+  // Real input reaches these from the operating system; events a page dispatches itself never do.
+  contents.on('before-input-event', (_event, input) => computerInput.key(input));
+  contents.on('input-event', (_event, input) => computerInput.pointer(input));
   view.setBackgroundColor(palette.color);
   win.contentView.addChildView(view);
   win.on('resize', sizeDashboard);
@@ -512,12 +574,18 @@ function computerMenu() {
   if (!computerBridge) return [];
   const info = computerLink.info();
   // A Windows menu label treats & as a shortcut marker.
-  const name = process.platform === 'win32' ? info?.name.replace(/&/g, '&&') : info?.name;
+  const menuText = text => process.platform === 'win32' ? String(text).replace(/&/g, '&&') : String(text);
+  const paused = computerLink.paused();
   return [
     { type: 'separator' },
     info
       ? { label: 'Use My Computer', submenu: [
-        { label: `Connected as ${name}`, enabled: false },
+        { label: `Connected as ${menuText(info.name)}`, enabled: false },
+        { type: 'separator' },
+        { label: paused ? 'Resume Use My Computer' : 'Pause Use My Computer', click: () => setComputerPaused(!paused) },
+        ...computerBridge.away().map(lease => ({
+          label: `End Away Mode for ${menuText(computerPolicy.label(lease.taskTitle, 40))}`, click: () => computerBridge.endAway(lease.id),
+        })),
         { type: 'separator' },
         { label: 'Disconnect This Computer…', click: () => { void disconnectComputer(); } },
       ] }
@@ -571,10 +639,12 @@ function installMenu() {
 
 // ── Use My Computer ────────────────────────────────────────────────────────
 // A task's agent can ask to run a command on this computer. Once the person connects the
-// computer, this main process polls 1904 for those requests, asks the person natively, runs what
-// they approve, shows it in Computer Activity and sends the output back. The dashboard page can
-// only read whether this computer is connected and start connecting it (the person confirms);
-// it can never run, approve or read anything. The token never leaves this process.
+// computer, this main process polls 1904 for those requests, answers only those for messages
+// this window sent (or inside away mode started here), asks the person natively, runs what they
+// approve in the sandbox, shows it in Computer Activity and sends the output back. The dashboard
+// page can only read whether this computer is connected and start connecting it or start away
+// mode (the person confirms each); it can never run, approve or read anything. The token and the
+// proof key never leave this process.
 
 function computerPlatform() {
   return computerPolicy.computerPlatform(process.platform);
@@ -582,7 +652,104 @@ function computerPlatform() {
 
 function computerState() {
   const info = computerLink?.info();
-  return info ? { connected: true, id: info.id, name: info.name, platform: computerPlatform() } : { connected: false };
+  return info
+    ? { connected: true, id: info.id, name: info.name, platform: computerPlatform(), paused: computerLink.paused() }
+    : { connected: false, paused: false };
+}
+
+// Why a folder cannot be an app's folder here, for a new choice and for every saved one read back.
+function computerFolderProblem(folder) {
+  return computerPolicy.folderChoiceProblem(folder, {
+    platform: computerPlatform(), home: os.homedir(), userData: app.getPath('userData'), realpath: realpathSync,
+  });
+}
+
+function setComputerPaused(paused) {
+  computerBridge?.setPaused(paused);
+  computerChanged();
+}
+
+// Touch ID where the Mac has it; otherwise the dialogs the person just answered are the confirmation.
+async function confirmWithTouchId(reason) {
+  if (process.platform !== 'darwin' || !systemPreferences.canPromptTouchID?.()) return undefined;
+  try {
+    await systemPreferences.promptTouchID(reason);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Full access: Touch ID, or a second dialog whose default is Cancel.
+async function confirmFullAccess(request) {
+  const touched = await confirmWithTouchId('run a command with full access');
+  if (touched !== undefined) return touched;
+  return (await messageBox(fullAccessConfirmation(request), computerParent())).response === 1;
+}
+
+// Away mode's questions: how long and whether with internet, then the command budget.
+async function awayChoice({ taskTitle }) {
+  const parent = computerParent();
+  const duration = awayDurationPrompt(taskTitle);
+  const first = await messageBox(duration, parent);
+  const minutes = duration.minutes[first.response];
+  if (!minutes) return undefined;
+  const budget = awayBudgetPrompt();
+  const second = await messageBox(budget, parent);
+  const maxCommands = budget.budgets[second.response];
+  if (!maxCommands) return undefined;
+  return { minutes, network: first.checkboxChecked === true, maxCommands };
+}
+
+// Started from the dashboard's own page: the person still answers every question here.
+async function startAwayFromDashboard(input) {
+  if (!computerBridge || !computerLink.info()) return computerState();
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  if (computerPlatform() !== 'macos') {
+    await messageBox({
+      type: 'info', title: 'Away mode', message: 'Away mode isn’t available on this computer yet',
+      detail: 'Away mode runs commands in a sandbox, which 1904 Desktop has only on macOS for now.', buttons: ['OK'],
+    }, parent);
+    return computerState();
+  }
+  const taskId = typeof input?.taskId === 'string' && /^[a-f0-9]{32}$/.test(input.taskId) ? input.taskId : undefined;
+  const appId = typeof input?.appId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(input.appId) ? input.appId : undefined;
+  if (!taskId || !appId) return computerState();
+  // Like a stamped message: only right after the person typed or clicked in the window, with it in front.
+  if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) return computerState();
+  const started = await computerBridge.startAway({ taskId, appId, taskTitle: computerPolicy.label(input.taskTitle, 200) || 'Task' });
+  if (!started.ok && started.message) {
+    await messageBox({ type: 'info', title: 'Away mode', message: 'Away mode didn’t start', detail: started.message, buttons: ['OK'] }, parent);
+  }
+  computerChanged();
+  return computerState();
+}
+
+function computerNotice(title, body) {
+  if (!Notification.isSupported()) return;
+  const notice = new Notification({ title, body });
+  computerNotices.add(notice);
+  const forget = () => computerNotices.delete(notice);
+  notice.once('click', () => { forget(); showActivity(); });
+  notice.once('close', forget);
+  notice.once('failed', forget);
+  notice.show();
+}
+
+// What the person hears about away mode while they may not be at the computer. Text from 1904 or the
+// agent is spelled out the way the prompt shows it, and marked where it was cut.
+function onComputerNotice(notice) {
+  const task = computerPolicy.shortLine(notice.lease?.taskTitle ?? notice.request?.task.title ?? 'a task', 60);
+  if (notice.kind === 'away-run') {
+    computerNotice(`Ran a command for “${task}”`, `${computerPolicy.shortLine(notice.request.command, 120)}\nAway mode: ${notice.lease.maxCommands - notice.lease.used} commands left.`);
+  } else if (notice.kind === 'away-started') {
+    const until = new Date(notice.lease.endsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    computerNotice('Away mode is on', `“${task}” can run sandboxed commands here until ${until}.`);
+  } else if (notice.kind === 'away-ended') {
+    const why = { time: 'Its time is up.', budget: 'It used its command budget.', elsewhere: 'It was ended from 1904.', desktop: 'You ended it.' }[notice.reason] || '';
+    computerNotice('Away mode ended', `“${task}”. ${why}`.trim());
+  }
+  computerChanged();
 }
 
 // Through the dashboard's own session, so these requests carry its sign-in and its Cloudflare clearance.
@@ -660,7 +827,7 @@ function computerFolders() {
 
 function activityState(output) {
   if (!computerBridge) {
-    return { connection: { connected: false, text: 'Use My Computer is available in 1904 Desktop for macOS and Windows.' }, runs: [], folders: [] };
+    return { connection: { connected: false, text: 'Use My Computer is available in 1904 Desktop for macOS and Windows.' }, runs: [], history: [], away: [], folders: [] };
   }
   return { ...computerBridge.snapshot({ output }), folders: computerFolders() };
 }
@@ -701,7 +868,7 @@ function sendComputerIndicator() {
 
 function computerChanged() {
   sendComputerIndicator();
-  const key = JSON.stringify(computerState());
+  const key = JSON.stringify([computerState(), computerBridge?.away().map(lease => lease.id)]);
   if (key !== computerMenuKey) {
     computerMenuKey = key;
     installMenu();
@@ -721,7 +888,7 @@ function computerAttention(request) {
   if (parent && !parent.isDestroyed() && parent.isFocused()) return;
   if (process.platform === 'win32' && parent && !parent.isDestroyed()) parent.flashFrame(true);
   if (!Notification.isSupported()) return;
-  const sender = computerPolicy.label(request.sender.name, 60) || 'Someone';
+  const sender = computerPolicy.shortLine(request.sender.name || 'Someone', 60);
   const notice = new Notification({ title: `${sender} wants to run a command on this computer`, body: 'Open 1904 Desktop to review it.' });
   computerNotices.add(notice);
   const forget = () => computerNotices.delete(notice);
@@ -742,7 +909,7 @@ async function chooseComputerFolder(appRef, parent) {
   const { canceled, filePaths } = parent && !parent.isDestroyed() ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
   const folder = filePaths?.[0];
   if (canceled || !folder) return false;
-  const problem = computerPolicy.folderChoiceProblem(folder, { platform: computerPlatform(), home: os.homedir() });
+  const problem = computerFolderProblem(folder);
   if (problem) {
     await messageBox({ type: 'warning', title: 'Use My Computer', message: 'Choose another folder', detail: problem, buttons: ['OK'] }, parent);
     return false;
@@ -803,23 +970,38 @@ async function disconnectComputer() {
 function startComputer() {
   const platform = computerPlatform();
   if (!platform) return;
-  computerLink = createComputerLink({ dir: app.getPath('userData'), safeStorage });
+  const userData = app.getPath('userData');
+  computerLink = createComputerLink({ dir: userData, safeStorage, folderProblem: computerFolderProblem });
+  computerMessages = computerProof.createMessageLog({ file: path.join(userData, 'computer-messages.json') });
+  let username = '';
+  try { username = os.userInfo().username; } catch { /* left empty */ }
   computerBridge = createComputerBridge({
-    origin: ORIGIN, fetch: sessionFetch, link: computerLink, platform, home: os.homedir(), env: process.env,
-    exists: existsSync, fs: { mkdir, stat }, spawn, kill: (pid, signal) => process.kill(pid, signal),
+    origin: ORIGIN, fetch: sessionFetch, link: computerLink, platform, home: os.homedir(), user: username, env: process.env,
+    messages: computerMessages,
+    leases: createAwayLeases({ file: path.join(userData, 'computer-away.json') }),
+    log: computerLog = createActivityLog({ file: path.join(userData, 'computer-activity.jsonl') }),
+    userData, tmpRoot: os.tmpdir(), exists: existsSync, realpathSync,
+    fs: { mkdir, stat, mkdtemp, rm, realpath }, spawn, kill: (pid, signal) => process.kill(pid, signal),
     clock: { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: timer => clearTimeout(timer) },
     ask: createDialogAsk({
       computerName: () => computerLink.info()?.name || computerPolicy.defaultComputerName(os.hostname()),
       showMessageBox: (view, signal) => messageBox({
-        type: 'question', title: view.title, message: view.message, detail: view.detail, buttons: view.buttons,
+        type: view.full ? 'warning' : 'question', title: view.title, message: view.message, detail: view.detail, buttons: view.buttons,
         defaultId: view.defaultId, cancelId: view.cancelId, noLink: true, signal,
+        ...(view.checkboxLabel ? { checkboxLabel: view.checkboxLabel, checkboxChecked: false } : {}),
       }, computerParent()),
       chooseFolder: appRef => chooseComputerFolder(appRef, computerParent()),
       attention: computerAttention,
+      confirmFull: confirmFullAccess,
     }),
+    awayChoice,
+    // true, false, or undefined where there is no Touch ID; then confirmLease asks once more.
+    confirmPresence: confirmWithTouchId,
+    confirmLease: async lease => (await messageBox(awayConfirmPrompt(lease), computerParent())).response === 1,
     onChange: computerChanged,
     onOutput: queueComputerOutput,
     onDisconnected: computerChanged,
+    onNotice: onComputerNotice,
   });
   powerMonitor.on('suspend', () => computerBridge.suspend());
   powerMonitor.on('resume', () => computerBridge.resume());
@@ -829,6 +1011,7 @@ function startComputer() {
 function installComputerHandlers() {
   ipcMain.handle('1904:computer-state', event => isComputerDashboardSender(event) ? computerState() : null);
   ipcMain.handle('1904:computer-connect', event => isComputerDashboardSender(event) ? connectComputer() : null);
+  ipcMain.handle('1904:computer-away', (event, input) => isComputerDashboardSender(event) ? startAwayFromDashboard(input) : null);
   ipcMain.on('1904:computer-activity', (event) => {
     if (isComputerDashboardSender(event)) showActivity();
   });
@@ -842,6 +1025,12 @@ function installComputerHandlers() {
   });
   ipcMain.on('1904:activity-stop', (event, id) => {
     if (isActivitySender(event) && computerPolicy.computerId(id)) computerBridge?.stopRun(id);
+  });
+  ipcMain.on('1904:activity-end-away', (event, id) => {
+    if (isActivitySender(event) && computerPolicy.computerId(id)) computerBridge?.endAway(id);
+  });
+  ipcMain.on('1904:activity-pause', (event, paused) => {
+    if (isActivitySender(event) && typeof paused === 'boolean' && computerLink?.info()) setComputerPaused(paused);
   });
   ipcMain.handle('1904:activity-folder', async (event, appId, action) => {
     if (!isActivitySender(event) || typeof appId !== 'string') return false;

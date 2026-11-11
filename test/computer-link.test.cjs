@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } = require('node:fs');
+const { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { basename, dirname, join } = require('node:path');
 const { test } = require('node:test');
@@ -7,6 +7,7 @@ const { FOLDERS_FILE, LINK_FILE, PAIR_PATH, connectPrompt, createComputerLink, p
 
 const ORIGIN = 'https://1904.ai';
 const TOKEN = 'tok_' + 'z'.repeat(40);
+const PROOF_KEY = Buffer.alloc(32, 0x5a).toString('base64url');
 
 function dataFolder(t) {
   const parent = realpathSync(tmpdir());
@@ -47,12 +48,13 @@ test('the connect prompt defaults to Cancel', () => {
   assert.deepEqual(prompt.buttons, ['Cancel', 'Connect']);
   assert.deepEqual([prompt.defaultId, prompt.cancelId], [0, 0], 'Return and Escape both cancel');
   assert.match(prompt.detail, /runs as you, with your permissions/);
+  assert.match(prompt.detail, /only for messages you send from 1904 Desktop/);
 });
 
-test('connecting asks first, then pairs with the dashboard session and keeps the token encrypted', async t => {
+test('connecting asks first, then pairs with the dashboard session and keeps the token and proof key encrypted', async t => {
   const dir = dataFolder(t);
   const link = createComputerLink({ dir, safeStorage: fakeSafeStorage() });
-  const { fetch, calls } = fakeFetch(200, { id: 'cmp_00000001', token: TOKEN, name: 'Studio Mac' });
+  const { fetch, calls } = fakeFetch(200, { id: 'cmp_00000001', token: TOKEN, name: 'Studio Mac', proofKey: PROOF_KEY });
   const asked = [];
   const connected = await pairComputer({
     link, fetch, origin: ORIGIN, computer,
@@ -70,9 +72,11 @@ test('connecting asks first, then pairs with the dashboard session and keeps the
 
   const onDisk = readFileSync(join(dir, LINK_FILE), 'utf8');
   assert.doesNotMatch(onDisk, new RegExp(TOKEN), 'the token is never written in clear');
+  assert.doesNotMatch(onDisk, new RegExp(PROOF_KEY), 'nor the proof key');
   assert.deepEqual(link.info(), { id: 'cmp_00000001', name: 'Studio Mac' });
   const reopened = createComputerLink({ dir, safeStorage: fakeSafeStorage() });
   assert.equal(await reopened.token(), TOKEN, 'it survives a restart');
+  assert.deepEqual(await reopened.proof(), { computerId: 'cmp_00000001', proofKey: PROOF_KEY });
 
   reopened.rename('Studio Mac Pro');
   assert.equal(createComputerLink({ dir, safeStorage: fakeSafeStorage() }).info().name, 'Studio Mac Pro');
@@ -109,7 +113,11 @@ test('cancel, signed out, too many computers and a bad answer leave nothing behi
     [401, {}, /Sign in to 1904 first/],
     [409, { error: 'You can connect up to 5 computers.' }, /up to 5 computers/],
     [409, {}, /Disconnect one in 1904 Settings/],
-    [200, { id: 'cmp_00000001', token: 'short', name: 'x' }, /Check your connection/],
+    [200, { id: 'cmp_00000001', token: 'short', name: 'x', proofKey: PROOF_KEY }, /Check your connection/],
+    [200, { id: 'cmp_00000001', token: TOKEN, name: 'x' }, /Check your connection/],
+    [200, { id: 'cmp_00000001', token: TOKEN, name: 'x', proofKey: 'pk_' + 'q'.repeat(30) }, /Check your connection/],
+    [200, { id: 'cmp_00000001', token: TOKEN, name: 'x', proofKey: Buffer.alloc(16).toString('base64url') }, /Check your connection/],
+    [503, { error: '1904 can’t connect computers right now.', code: 'computer.unavailable' }, /can’t connect computers right now/],
     [500, {}, /Check your connection/],
   ]) {
     const notices = [];
@@ -134,4 +142,43 @@ test('each app’s folder choice is kept by app id and can be reset', async t =>
   assert.equal(link.folders.reset('app_1'), true);
   assert.equal(link.folders.reset('app_1'), false);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, FOLDERS_FILE), 'utf8')), {});
+});
+
+test('a saved folder choice that is no longer allowed is dropped when read, whoever wrote the file', t => {
+  const dir = dataFolder(t);
+  const good = join(dir, 'checkout');
+  const bad = join(dir, 'secrets');
+  writeFileSync(join(dir, FOLDERS_FILE), JSON.stringify({ app_1: { path: good, name: 'Shop' }, app_2: { path: bad, name: 'Blog' } }));
+  const link = createComputerLink({ dir, safeStorage: fakeSafeStorage(), folderProblem: folder => folder === bad ? 'Not here.' : undefined });
+  assert.deepEqual(Object.keys(link.folders.all()), ['app_1']);
+  assert.equal(link.folders.get('app_2'), undefined);
+  assert.equal(link.folders.set('app_3', bad), false, 'and never saved');
+});
+
+test('the Pause switch survives a restart', t => {
+  const dir = dataFolder(t);
+  const link = createComputerLink({ dir, safeStorage: fakeSafeStorage() });
+  assert.equal(link.paused(), false);
+  link.setPaused(true);
+  assert.equal(createComputerLink({ dir, safeStorage: fakeSafeStorage() }).paused(), true);
+  link.setPaused(false);
+  assert.equal(link.paused(), false);
+});
+
+test('when this computer last heard from 1904 is kept, written at most hourly', async t => {
+  const dir = dataFolder(t);
+  let now = 5_000_000;
+  const link = createComputerLink({ dir, safeStorage: fakeSafeStorage(), now: () => now });
+  await link.save({ id: 'cmp_00000001', name: 'Studio Mac', token: TOKEN, proofKey: PROOF_KEY });
+  assert.equal(link.seenAt(), 5_000_000);
+  now += 60_000;
+  link.touch();
+  assert.equal(link.seenAt(), now, 'the first answer after starting is written');
+  const first = now;
+  now += 30 * 60_000;
+  link.touch();
+  assert.equal(link.seenAt(), first, 'not again within the hour');
+  now += 31 * 60_000;
+  link.touch();
+  assert.equal(link.seenAt(), now);
 });

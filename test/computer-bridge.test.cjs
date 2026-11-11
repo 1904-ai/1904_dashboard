@@ -2,8 +2,10 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { test } = require('node:test');
-const { BLOCKED_WAIT_MS, createComputerBridge, POLL_PATH, QUICK_ANSWER_MS, RESULT_PATH, UNCONFIRMED } = require('../computer-bridge.cjs');
+const { BLOCKED_WAIT_MS, createComputerBridge, NO_SANDBOX, POLL_PATH, QUICK_ANSWER_MS, RESULT_PATH, UNCONFIRMED } = require('../computer-bridge.cjs');
 const { TOO_LONG } = require('../computer-approval.cjs');
+const { createAwayLeases } = require('../computer-away.cjs');
+const { NOT_FROM_DESKTOP } = require('../computer-policy.cjs');
 
 const ORIGIN = 'https://1904.ai';
 const START = 1_700_000_000_000;
@@ -44,9 +46,10 @@ function fake1904(clock) {
   const open = [];
   const queued = [];
   const results = [];
+  const away = [];
   const state = {
     offline: false, pollStatus: 200, pollBody: {}, resultStatus: 200, runningStatus: [], polls: 0, resultCalls: 0, revokes: 0,
-    serverOffset: undefined,
+    serverOffset: undefined, awayStatus: 200,
   };
   const dated = () => state.serverOffset === undefined ? {} : { date: new Date(clock.now() + state.serverOffset).toUTCString() };
   async function fetch(url, init = {}) {
@@ -72,10 +75,11 @@ function fake1904(clock) {
       state.resultCalls++;
       assert.equal(init.method, 'POST');
       const update = JSON.parse(init.body);
-      // runningStatus: what each "running" gets in turn (a number, or 'offline'); 200 once the list is used up.
+      // runningStatus: what each "running" gets in turn (a status, { status, body }, or 'offline'); 200 once the list is used up.
       const running = update.status === 'running' ? state.runningStatus.shift() ?? 200 : undefined;
       if (state.offline || running === 'offline') throw new TypeError('fetch failed');
       results.push(update);
+      if (running && typeof running === 'object') return answer(running.status, running.body);
       return answer(running ?? state.resultStatus, {});
     }
     if (pathname === '/api/desktop/computer/pair' && init.method === 'DELETE') {
@@ -83,27 +87,47 @@ function fake1904(clock) {
       if (state.offline) throw new TypeError('fetch failed');
       return answer(200, { ok: true });
     }
+    if (pathname === '/api/desktop/computer/away' && init.method === 'POST') {
+      const body = JSON.parse(init.body);
+      away.push(body);
+      if (state.offline) throw new TypeError('fetch failed');
+      if (body.action === 'end') return answer(200, { ok: true });
+      if (state.awayStatus !== 200) return answer(state.awayStatus, { error: 'This task cannot use away mode.' });
+      return answer(200, { lease: { id: `lease_${String(away.length).padStart(8, '0')}`, computerId: 'cmp_00000001', taskId: body.taskId, appId: body.appId,
+        taskTitle: 'Fix the login page', network: body.network, maxCommands: body.maxCommands, used: 0, startedAt: clock.now(), endsAt: clock.now() + body.minutes * 60_000 } });
+    }
     throw new Error(`Unexpected request to ${url}`);
   }
   function deliver(body) {
-    const full = { enabled: true, computer: { id: 'cmp_00000001', name: 'Studio Mac' }, requests: [], cancelled: [], ...body };
+    const full = { enabled: true, computer: { id: 'cmp_00000001', name: 'Studio Mac' }, requests: [], cancelled: [], awayEnded: [], ...body };
     const waiting = open.shift();
     if (waiting) waiting.resolve(full);
     else queued.push(full);
   }
-  return { fetch, deliver, results, state, get openPolls() { return open.length; } };
+  return { fetch, deliver, results, away, state, get openPolls() { return open.length; } };
 }
 
-function fakeLink() {
+function fakeLink({ seenAt = START } = {}) {
   let stored = { id: 'cmp_00000001', name: 'Studio Mac', token: 'tok_test' };
   const chosen = {};
+  let paused = false;
   return {
     info: () => stored && { id: stored.id, name: stored.name },
     token: async () => stored?.token,
     forget() { stored = undefined; },
     rename(name) { if (stored) stored.name = name; },
+    touch() {},
+    seenAt: () => seenAt,
+    paused: () => paused,
+    setPaused(value) { paused = value === true; },
     folders: { get: id => chosen[id], set: (id, folder) => { chosen[id] = folder; } },
   };
+}
+
+// The messages this computer "sent": every test request's message is one, unless a test says otherwise.
+function fakeMessages() {
+  const sent = new Set(Array.from({ length: 9 }, (_, i) => `msg_00000000${i + 1}`));
+  return { sent, has: id => sent.has(id), record: id => sent.add(id), clear() { sent.clear(); } };
 }
 
 // A stand-in shell: each child is driven by the test. taskkill ends the child it names.
@@ -144,42 +168,71 @@ function fakeShell({ missing = false } = {}) {
   return { spawn, children, spawned };
 }
 
-function setup({ platform = 'macos', home = '/Users/dana', env = { SHELL: '/bin/zsh' }, dirs = [], missing = false } = {}) {
+const PARENT_ENV = { SHELL: '/bin/zsh', HOME: '/Users/dana', USER: 'dana', GITHUB_TOKEN: 'ghp_never_in_a_command', AWS_SECRET_ACCESS_KEY: 'never' };
+
+function setup({
+  platform = 'macos', home = '/Users/dana', env = PARENT_ENV, dirs = [], missing = false, sandboxExec = true, seenAt,
+  awayChoice = async () => ({ minutes: 60, network: false, maxCommands: 50 }), confirmPresence = async () => true,
+  confirmLease = async () => true,
+} = {}) {
   const clock = fakeClock();
   const server = fake1904(clock);
-  const link = fakeLink();
+  const link = fakeLink({ seenAt });
+  const messages = fakeMessages();
+  const leases = createAwayLeases({ now: clock.now });
+  const logged = [];
   const shell = fakeShell({ missing });
   const folders = new Set(dirs);
   const made = [];
+  const temps = [];
+  const removed = [];
   const killed = [];
   const prompts = [];
   const disconnected = [];
+  const notices = [];
+  const choices = [];
+  const presence = [];
+  const leaseQuestions = [];
   const bridge = createComputerBridge({
-    origin: ORIGIN, fetch: server.fetch, link, platform, home, env, exists: () => false,
+    origin: ORIGIN, fetch: server.fetch, link, messages, leases, platform, home, user: 'dana', env,
+    log: { append: entry => logged.push({ ...entry }), list: limit => logged.slice().reverse().slice(0, limit) },
+    userData: `${home}/Library/Application Support/1904 Desktop`, tmpRoot: '/private/tmp',
+    exists: file => sandboxExec && file === '/usr/bin/sandbox-exec',
     fs: {
       mkdir: async folder => { made.push(folder); folders.add(folder); },
       stat: async folder => {
         if (folders.has(folder)) return { isDirectory: () => true };
         throw Object.assign(new Error('missing'), { code: 'ENOENT' });
       },
+      mkdtemp: async prefix => { const dir = `${prefix}${temps.length + 1}`; temps.push(dir); return dir; },
+      realpath: async value => value,
+      rm: async value => { removed.push(value); },
     },
+    resolvePath: async () => '/opt/homebrew/bin:/usr/bin:/bin',
     spawn: shell.spawn,
     kill: (pid, signal) => {
       killed.push([pid, signal]);
       shell.children.find(child => child.pid === -pid)?.finish(null, signal);
     },
     clock,
-    ask: (request, { signal, describe }) => new Promise(resolve => {
-      const prompt = { request, place: describe(request), open: true };
-      prompt.answer = choice => { prompt.open = false; resolve(choice); };
+    ask: (request, options) => new Promise(resolve => {
+      const prompt = { request, options, place: options.describe(request), open: true };
+      prompt.answer = (choice, network = false) => { prompt.open = false; resolve({ choice, network }); };
       prompts.push(prompt);
-      signal.addEventListener('abort', () => { prompt.open = false; prompt.aborted = true; resolve('decline'); });
+      options.signal.addEventListener('abort', () => { prompt.open = false; prompt.aborted = true; resolve({ choice: 'decline' }); });
     }),
+    awayChoice: async task => { choices.push(task); return awayChoice(task); },
+    confirmPresence: async reason => { presence.push(reason); return confirmPresence(reason); },
+    confirmLease: async lease => { leaseQuestions.push(lease); return confirmLease(lease); },
     onDisconnected: reason => disconnected.push(reason),
+    onNotice: notice => notices.push(notice),
   });
   const openPrompts = () => prompts.filter(prompt => prompt.open);
   const run = id => bridge.snapshot({ output: true }).runs.find(entry => entry.id === id);
-  return { clock, server, link, shell, folders, made, killed, prompts, openPrompts, disconnected, bridge, run };
+  return {
+    clock, server, link, messages, leases, logged, shell, folders, made, temps, removed, killed, prompts, openPrompts,
+    disconnected, notices, choices, presence, leaseQuestions, bridge, run,
+  };
 }
 
 let sequence = 0;
@@ -188,6 +241,7 @@ function request(overrides = {}) {
   return {
     id: `req_${String(sequence).padStart(9, '0')}`, kind: 'run', messageId: 'msg_000000001',
     command: 'uname -a', timeoutSeconds: 30, reason: 'Check the macOS version.',
+    access: 'sandbox', network: false, origin: { kind: 'desktop' },
     app: { id: 'app_1', name: 'Shop', repo: 'shop' },
     task: { id: 'task_1', title: 'Fix the login page' },
     sender: { id: 'user_1', name: 'Dana' },
@@ -210,16 +264,25 @@ test('an approved command runs in the app folder and its output and exit code go
   assert.equal(t.run(ask.id).asking, true);
   assert.equal(t.shell.children.length, 0, 'nothing runs before the person answers');
 
+  assert.equal(t.prompts[0].options.full, false, 'a sandboxed command');
+  assert.equal(typeof t.prompts[0].options.startAway, 'function', 'away mode is offered on macOS');
   t.prompts[0].answer('once');
   await flush();
   assert.deepEqual(t.made, ['/Users/dana/1904/shop'], 'the folder is created on first use');
   const child = t.shell.children[0];
-  assert.equal(child.file, '/bin/zsh');
-  assert.deepEqual(child.args, ['-l', '-c', 'uname -a']);
+  assert.equal(child.file, '/usr/bin/sandbox-exec', 'it runs in the sandbox');
+  assert.deepEqual(child.args.slice(-4), ['/bin/zsh', '-f', '-c', 'uname -a'], 'with no startup files');
+  assert.equal(child.args[child.args.lastIndexOf('-p') + 1].split('\n')[0], '(version 1)');
+  assert.ok(child.args.includes('P0=/Users/dana/1904/shop'), 'writes allowed in the app’s folder');
+  assert.ok(child.args.includes('P1=/private/tmp/1904-run-1'), 'and in its own temp folder');
+  assert.ok(!child.args[child.args.lastIndexOf('-p') + 1].includes('(allow network-outbound'), 'no network');
   assert.equal(child.options.cwd, '/Users/dana/1904/shop');
   assert.deepEqual(child.options.stdio, ['ignore', 'pipe', 'pipe'], 'stdin is closed');
   assert.equal(child.options.detached, true);
   assert.equal(child.options.windowsHide, true);
+  assert.deepEqual(child.options.env, {
+    PATH: '/opt/homebrew/bin:/usr/bin:/bin', HOME: '/Users/dana', USER: 'dana', SHELL: '/bin/zsh', TERM: 'dumb', TMPDIR: '/private/tmp/1904-run-1',
+  }, 'nothing else from 1904 Desktop’s environment, never its tokens');
   assert.deepEqual(t.server.results, [{ requestId: ask.id, status: 'running', cwd: '/Users/dana/1904/shop' }]);
   assert.equal(t.bridge.running(), 1);
 
@@ -238,6 +301,8 @@ test('an approved command runs in the app folder and its output and exit code go
   assert.deepEqual(shown.output, [{ stream: 'stdout', text: 'Darwin\n' }, { stream: 'stderr', text: 'a note\n' }]);
   assert.equal(t.bridge.running(), 0);
   assert.equal(t.server.openPolls, 1, 'polling carries on');
+  assert.deepEqual(t.removed, ['/private/tmp/1904-run-1'], 'its temp folder is removed');
+  assert.deepEqual(t.logged.map(entry => [entry.id, entry.status, entry.access]), [[ask.id, 'done', 'sandbox']], 'and it is in this computer’s own log');
 });
 
 test('a declined command never runs and 1904 hears that the person declined', async () => {
@@ -381,7 +446,7 @@ test('one prompt at a time; "Allow for this message" covers that message inside 
 
   t.prompts[0].answer('allow');
   await flush();
-  assert.deepEqual(t.shell.children.map(child => child.args[2]), ['git status', 'ls'], 'the same message’s request runs without a prompt');
+  assert.deepEqual(t.shell.children.map(child => child.args.at(-1)), ['git status', 'ls'], 'the same message’s request runs without a prompt');
   assert.equal(t.shell.children[1].options.cwd, '/Users/dana/1904/shop/src');
   assert.equal(t.run(c.id).approval, 'covered', 'it still appears in Computer Activity');
   assert.deepEqual(t.openPrompts().map(prompt => prompt.request.id), [b.id], 'another message still asks');
@@ -509,8 +574,8 @@ test('a request this app cannot read is reported as failed and never shown', asy
   assert.match(t.server.results[0].message, /update 1904 Desktop/);
 });
 
-test('a missing shell fails the request with a plain message', async () => {
-  const t = setup({ missing: true, env: { SHELL: '/opt/missing/zsh' } });
+test('a program that cannot start fails the request with a plain message', async () => {
+  const t = setup({ missing: true });
   t.bridge.start();
   await flush();
   const ask = request();
@@ -519,7 +584,7 @@ test('a missing shell fails the request with a plain message', async () => {
   t.prompts[0].answer('once');
   await flush();
   assert.deepEqual(t.server.results.map(update => update.status), ['running', 'failed'], '1904 confirms before the shell is started');
-  assert.equal(t.server.results[1].message, 'Not found: /opt/missing/zsh');
+  assert.equal(t.server.results[1].message, 'Not found: /usr/bin/sandbox-exec');
   assert.equal(t.run(ask.id).status, 'failed');
 });
 
@@ -831,4 +896,309 @@ test('a 403 computer.blocked keeps the token and asks again every five minutes',
   await flush();
   assert.equal(t.bridge.connection().status, 'connected');
   assert.deepEqual(t.disconnected, [], 'only a 401 forgets the token');
+});
+
+// ── Round 3: origin, sandbox, full access, away mode, pause, the local record ──
+
+const profileOf = child => child.args[child.args.lastIndexOf('-p') + 1];
+
+test('a request for a message this computer did not send is refused without a prompt', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  const stranger = request({ messageId: 'msg_000000077' });
+  const noOrigin = request();
+  delete noOrigin.origin;
+  t.server.deliver({ requests: [stranger, noOrigin] });
+  await flush();
+  assert.equal(t.prompts.length, 0);
+  assert.equal(t.shell.children.length, 0);
+  for (const refused of [stranger, noOrigin]) {
+    const result = t.server.results.find(update => update.requestId === refused.id);
+    assert.deepEqual([result.status, result.message], ['failed', NOT_FROM_DESKTOP]);
+  }
+  assert.equal(NOT_FROM_DESKTOP, '1904 Desktop did not send this message, so it will not run commands for it.');
+  assert.equal(t.run(stranger.id).status, 'failed', 'listed in Computer Activity');
+  assert.ok(t.logged.some(entry => entry.id === stranger.id && entry.status === 'failed'), 'and in the log');
+});
+
+test('full access always asks, with no allowance and no away mode, and runs without the sandbox in a clean environment', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  const first = request({ access: 'full', command: 'git push' });
+  t.server.deliver({ requests: [first] });
+  await flush();
+  assert.equal(t.prompts[0].options.full, true);
+  assert.equal(t.prompts[0].options.startAway, undefined, 'away mode is never offered for full access');
+  t.prompts[0].answer('allow');
+  await flush();
+  const child = t.shell.children[0];
+  assert.equal(child.file, '/bin/zsh');
+  assert.deepEqual(child.args, ['-f', '-c', 'git push'], 'the person’s shell without startup files');
+  assert.equal(child.options.env.GITHUB_TOKEN, undefined);
+  assert.equal(child.options.env.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(t.run(first.id).access, 'full');
+  child.finish(0);
+  await flush();
+  const second = request({ access: 'full' });
+  t.server.deliver({ requests: [second] });
+  await flush();
+  assert.equal(t.openPrompts()[0]?.request.id, second.id, 'never covered by "Allow for this message"');
+});
+
+test('internet access reaches the sandbox only when the person ticked it', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  const first = request({ network: true });
+  t.server.deliver({ requests: [first] });
+  await flush();
+  t.prompts[0].answer('once', false);
+  await flush();
+  assert.doesNotMatch(profileOf(t.shell.children[0]), /allow network-outbound/);
+  t.shell.children[0].finish(0);
+  await flush();
+  const second = request({ network: true, messageId: 'msg_000000002' });
+  t.server.deliver({ requests: [second] });
+  await flush();
+  t.openPrompts()[0].answer('once', true);
+  await flush();
+  assert.match(profileOf(t.shell.children[1]), /^\(allow network-outbound \(remote ip "\*:\*"\)\)$/m);
+  assert.equal(t.run(second.id).network, true);
+});
+
+test('without sandbox-exec a sandboxed command is refused before anything starts', async () => {
+  const t = setup({ sandboxExec: false });
+  t.bridge.start();
+  await flush();
+  const ask = request();
+  t.server.deliver({ requests: [ask] });
+  await flush();
+  t.prompts[0].answer('once');
+  await flush();
+  assert.equal(t.shell.children.length, 0);
+  assert.deepEqual(t.server.results.map(update => [update.status, update.message]), [['failed', NO_SANDBOX]]);
+});
+
+test('away mode: started here with Touch ID, it runs the task’s sandboxed commands without asking until its budget runs out', async () => {
+  const t = setup({ awayChoice: async () => ({ minutes: 60, network: false, maxCommands: 1 }) });
+  t.bridge.start();
+  await flush();
+  const first = request();
+  t.server.deliver({ requests: [first] });
+  await flush();
+  // The person picks "Allow while I’m away…" in the prompt.
+  assert.equal(await t.prompts[0].options.startAway(), true);
+  t.prompts[0].answer('away');
+  await flush();
+  assert.deepEqual(t.server.away[0], { action: 'start', taskId: 'task_1', appId: 'app_1', minutes: 60, network: false, maxCommands: 1 });
+  assert.deepEqual(t.presence, ['start away mode for “Fix the login page”'], 'Touch ID where available');
+  assert.ok(t.notices.some(notice => notice.kind === 'away-started'));
+  assert.equal(t.shell.children.length, 1, 'the request the person answered runs');
+  assert.equal(t.run(first.id).approval, 'once', 'they approved it themselves');
+  t.shell.children[0].finish(0);
+  await flush();
+  assert.equal(t.leases.list()[0].used, 0, 'a message sent from this window does not use the budget, as on 1904');
+
+  // A later message from this window still asks, lease or not.
+  const fromHere = request({ messageId: 'msg_000000002' });
+  t.server.deliver({ requests: [fromHere] });
+  await flush();
+  assert.equal(t.openPrompts()[0]?.request.id, fromHere.id, 'away mode covers only messages sent from elsewhere');
+  t.openPrompts()[0].answer('decline');
+  await flush();
+
+  // A message sent from a phone: 1904 marks it away, with this lease.
+  const leaseId = t.leases.list()[0].id;
+  const fromPhone = request({ messageId: 'msg_000000088', origin: { kind: 'away', leaseId } });
+  t.server.deliver({ requests: [fromPhone] });
+  await flush();
+  assert.equal(t.prompts.length, 2, 'no prompt for a message from elsewhere in away mode');
+  assert.equal(t.shell.children.length, 2);
+  assert.equal(t.shell.children[1].file, '/usr/bin/sandbox-exec', 'still in the sandbox');
+  assert.ok(t.notices.some(notice => notice.kind === 'away-run' && notice.request.id === fromPhone.id), 'announced');
+  t.shell.children[1].finish(0);
+  await flush();
+  assert.deepEqual(t.leases.list(), [], 'the command from elsewhere used the budget');
+  assert.ok(!t.server.away.some(call => call.action === 'end'), '1904 ends it at the same count itself');
+  assert.ok(t.notices.some(notice => notice.kind === 'away-ended' && notice.reason === 'budget'));
+
+  const late = request({ messageId: 'msg_000000089', origin: { kind: 'away', leaseId } });
+  t.server.deliver({ requests: [late] });
+  await flush();
+  assert.equal(t.shell.children.length, 2);
+  assert.match(t.server.results.find(update => update.requestId === late.id).message, /Away mode is not on for this task/);
+});
+
+test('away mode never starts without the person, and the cloud cannot start one', async () => {
+  const noTouch = setup({ confirmPresence: async () => false });
+  noTouch.bridge.start();
+  await flush();
+  assert.equal((await noTouch.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'Fix' })).ok, false);
+  assert.deepEqual(noTouch.server.away, [], 'Touch ID refused: 1904 is never asked');
+  const cancelled = setup({ awayChoice: async () => undefined });
+  cancelled.bridge.start();
+  await flush();
+  assert.equal((await cancelled.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'Fix' })).ok, false);
+  assert.deepEqual(cancelled.presence, [], 'cancelled questions end it before Touch ID');
+  // An away request with a lease id this computer never started is refused.
+  const forged = request({ messageId: 'msg_000000099', origin: { kind: 'away', leaseId: 'lease_forged01' } });
+  cancelled.server.deliver({ requests: [forged] });
+  await flush();
+  assert.equal(cancelled.shell.children.length, 0);
+  assert.match(cancelled.server.results[0].message, /Away mode is not on/);
+});
+
+test('without Touch ID, away mode asks once more with 1904’s own task title, and Cancel ends it at once', async () => {
+  const declined = setup({ confirmPresence: async () => undefined, confirmLease: async () => false });
+  declined.bridge.start();
+  await flush();
+  const refused = await declined.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'A title the page made up' });
+  await flush();
+  assert.equal(refused.ok, false);
+  assert.deepEqual(declined.leaseQuestions.map(lease => [lease.taskTitle, lease.minutes, lease.maxCommands, lease.network]),
+    [['Fix the login page', 60, 50, false]], 'the question names 1904’s task, not the page’s');
+  assert.deepEqual(declined.server.away.map(call => call.action), ['start', 'end'], 'ended at once');
+  assert.deepEqual(declined.bridge.away(), [], 'never kept here, so nothing ran under it');
+
+  const confirmed = setup({ confirmPresence: async () => undefined, confirmLease: async () => true });
+  confirmed.bridge.start();
+  await flush();
+  const started = await confirmed.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'A title the page made up' });
+  assert.equal(started.ok, true);
+  assert.equal(confirmed.bridge.away()[0].taskTitle, 'Fix the login page');
+
+  const touched = setup({ confirmPresence: async () => true });
+  touched.bridge.start();
+  await flush();
+  assert.equal((await touched.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'x' })).ok, true);
+  assert.deepEqual(touched.leaseQuestions, [], 'Touch ID is enough');
+});
+
+test('away mode covers sandboxed commands only; full access still waits for the person', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  const { lease } = await t.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'Fix the login page' });
+  const fullHere = request({ access: 'full' });
+  const fullAway = request({ access: 'full', messageId: 'msg_000000090', origin: { kind: 'away', leaseId: lease.id } });
+  const online = request({ network: true, messageId: 'msg_000000091', origin: { kind: 'away', leaseId: lease.id } });
+  t.server.deliver({ requests: [fullHere, fullAway, online] });
+  await flush();
+  assert.deepEqual(t.openPrompts().map(prompt => prompt.request.id), [fullHere.id], 'full access from this computer asks');
+  assert.match(t.server.results.find(update => update.requestId === fullAway.id).message, /sandboxed commands only/);
+  assert.match(t.server.results.find(update => update.requestId === online.id).message, /no internet access/);
+  assert.equal(t.shell.children.length, 0);
+});
+
+test('a "running" answered away_ended withdraws the command and ends away mode here', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  const { lease } = await t.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'Fix the login page' });
+  t.server.state.runningStatus = [{ status: 409, body: { error: 'Away mode ended.', code: 'computer.away_ended' } }];
+  const late = request({ messageId: 'msg_000000092', origin: { kind: 'away', leaseId: lease.id } });
+  t.server.deliver({ requests: [late] });
+  await flush();
+  assert.equal(t.shell.children.length, 0);
+  assert.equal(t.run(late.id).status, 'withdrawn');
+  assert.deepEqual(t.bridge.away(), [], 'the lease ended here too');
+  assert.ok(!t.server.away.some(call => call.action === 'end'), '1904 already knows');
+});
+
+test('away mode ends at its time, from Desktop, and when 1904 says it ended elsewhere', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  const task = { taskId: 'task_1', appId: 'app_1', taskTitle: 'Fix the login page' };
+  await t.bridge.startAway(task);
+  await t.clock.advance(60 * 60_000);
+  assert.deepEqual(t.bridge.away(), []);
+  assert.ok(t.notices.some(notice => notice.kind === 'away-ended' && notice.reason === 'time'));
+
+  const second = (await t.bridge.startAway(task)).lease;
+  assert.equal(t.bridge.away()[0].commandsLeft, 50);
+  assert.equal(t.bridge.endAway(second.id), true);
+  await flush();
+  assert.ok(t.server.away.some(call => call.action === 'end' && call.leaseId === second.id), 'ended here, so 1904 hears it');
+
+  const third = (await t.bridge.startAway(task)).lease;
+  const ends = t.server.away.filter(call => call.action === 'end').length;
+  t.server.deliver({ awayEnded: [third.id] });
+  await t.clock.advance(30_000);
+  assert.deepEqual(t.bridge.away(), []);
+  assert.equal(t.server.away.filter(call => call.action === 'end').length, ends, '1904 already knows');
+  assert.ok(t.notices.some(notice => notice.kind === 'away-ended' && notice.reason === 'elsewhere'));
+});
+
+test('Windows has no sandbox yet: every command is full access, with no allowance and no away mode', async () => {
+  const t = setup({ platform: 'windows', home: 'C:\\Users\\dana', env: { SystemRoot: 'C:\\Windows', Path: 'C:\\Windows\\system32', GITHUB_TOKEN: 'never' } });
+  t.bridge.start();
+  await flush();
+  const first = request();
+  t.server.deliver({ requests: [first] });
+  await flush();
+  assert.equal(t.prompts[0].options.full, true);
+  assert.equal(t.prompts[0].options.startAway, undefined);
+  t.prompts[0].answer('allow');
+  await flush();
+  const child = t.shell.children[0];
+  assert.match(child.file, /powershell\.exe$/);
+  assert.equal(child.options.env.GITHUB_TOKEN, undefined);
+  assert.deepEqual([child.options.env.TEMP, child.options.env.TMP], ['\\private\\tmp\\1904-run-1', '\\private\\tmp\\1904-run-1'], 'its own temp folder');
+  child.finish(0);
+  await flush();
+  t.server.deliver({ requests: [request()] });
+  await flush();
+  assert.equal(t.openPrompts().length, 1, 'the same message asks again');
+  assert.match((await t.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'x' })).message, /only on macOS/);
+});
+
+test('Pause stops polling and closes prompts until the person resumes', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  const ask = request();
+  t.server.deliver({ requests: [ask] });
+  await flush();
+  t.bridge.setPaused(true);
+  await flush();
+  assert.equal(t.prompts[0].aborted, true);
+  assert.deepEqual(t.server.results.map(update => [update.status, update.message]), [['cancelled', 'The person paused Use My Computer on this computer.']]);
+  assert.deepEqual([t.bridge.connection().status, t.bridge.connection().paused], ['paused', true]);
+  assert.equal(t.server.openPolls, 0);
+  const polls = t.server.state.polls;
+  await t.clock.advance(120_000);
+  assert.equal(t.server.state.polls, polls, 'no polling while paused');
+  assert.equal(t.bridge.start(), false, 'starting does nothing while paused');
+  t.bridge.setPaused(false);
+  await flush();
+  assert.equal(t.server.openPolls, 1);
+  assert.equal(t.bridge.connection().paused, false);
+});
+
+test('a 401 after a month without use says the pairing lapsed', async () => {
+  const t = setup({ seenAt: START - 31 * 24 * 60 * 60_000 });
+  t.server.state.pollStatus = 401;
+  t.bridge.start();
+  await flush();
+  assert.deepEqual(t.disconnected, ['lapsed']);
+  assert.equal(t.bridge.connection().status, 'lapsed');
+  assert.match(t.bridge.connection().text, /lapsed after 30 days without use/);
+  assert.equal(t.messages.sent.size, 0, 'the list of sent messages goes with the pairing');
+});
+
+test('Computer Activity lists earlier commands from the log and the active away mode', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  t.logged.push({ id: 'req_old000001', at: 1, status: 'done', command: 'echo \u202Eold', task: { title: 'Old task' }, sender: { name: 'Dana' }, app: { name: 'Shop' }, stdout: 'old\n', stderr: '' });
+  t.logged.push({ kind: 'note', at: 2, note: 'not stamped: no recent input', messageId: 'x' });
+  await t.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'Fix the login page' });
+  const snapshot = t.bridge.snapshot({ output: true });
+  assert.deepEqual(snapshot.history.map(run => [run.id, run.command]), [['req_old000001', 'echo <U+202E>old']]);
+  assert.deepEqual(snapshot.history[0].output, [{ stream: 'stdout', text: 'old\n' }]);
+  assert.deepEqual(snapshot.away.map(lease => [lease.taskTitle, lease.commandsLeft]), [['Fix the login page', 50]]);
+  assert.equal(t.bridge.snapshot().history[0].output, undefined, 'output only on the first full load');
 });

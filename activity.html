@@ -13,6 +13,16 @@
     body { margin: 0; background: var(--canvas); color: var(--text); font: 400 13px/1.45 system-ui, sans-serif; }
     header { position: sticky; top: 0; z-index: 1; padding: 14px 18px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
     h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+    .header-row { display: flex; align-items: center; gap: 12px; }
+    .header-row button { margin-left: auto; }
+    #pause[hidden], #away-section[hidden], #history-section[hidden] { display: none; }
+    .away { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border: 1px solid var(--wait); border-radius: 8px; background: var(--panel); padding: 8px 12px; }
+    .away-title { font-weight: 600; }
+    .away-detail { flex: 1 1 240px; color: var(--muted); }
+    .access { font-size: 11px; font-weight: 600; color: var(--muted); }
+    .access[data-full] { color: var(--bad); }
+    details { margin-top: 8px; }
+    summary { cursor: pointer; color: var(--muted); }
     #connection { margin: 4px 0 0; color: var(--muted); }
     main { padding: 4px 18px 24px; }
     h2 { margin: 18px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
@@ -54,14 +64,26 @@
 </head>
 <body>
   <header>
-    <h1>Computer Activity</h1>
+    <div class="header-row">
+      <h1>Computer Activity</h1>
+      <button type="button" id="pause" hidden></button>
+    </div>
     <p id="connection" role="status"></p>
   </header>
   <main>
+    <section aria-labelledby="away-title" id="away-section" hidden>
+      <h2 id="away-title">Away mode</h2>
+      <ul id="away"></ul>
+    </section>
     <section aria-labelledby="runs-title">
       <h2 id="runs-title">Commands</h2>
-      <p id="runs-empty" class="empty">Commands that a task’s agent asks to run on this computer appear here with their output. Nothing runs until you approve it.</p>
+      <p id="runs-empty" class="empty">Commands that a task’s agent asks to run on this computer appear here with their output. Nothing runs until you approve it or start away mode.</p>
       <ol id="runs"></ol>
+    </section>
+    <section aria-labelledby="history-title" id="history-section" hidden>
+      <h2 id="history-title">Earlier on this computer</h2>
+      <p class="hint">1904 Desktop keeps its own record of the last 1,000 commands on this computer, with the end of their output.</p>
+      <ol id="history"></ol>
     </section>
     <section aria-labelledby="folders-title">
       <h2 id="folders-title">App folders</h2>

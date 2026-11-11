@@ -4,7 +4,50 @@
 
 const path = require('node:path');
 const { StringDecoder } = require('node:string_decoder');
-const { COMPUTER_STDOUT_MAX, COMPUTER_STDERR_MAX, createClixmlDecoder, createTail } = require('./computer-policy.cjs');
+const { COMPUTER_STDOUT_MAX, COMPUTER_STDERR_MAX, DEFAULT_PATH, cleanSearchPath, createClixmlDecoder, createTail } = require('./computer-policy.cjs');
+
+const LOGIN_PATH_SHELLS = ['zsh', 'bash', 'sh', 'dash', 'ksh', 'fish'];
+const PATH_MARK = '__1904_PATH__=';
+
+/**
+ * The PATH the person's login shell sets up (Homebrew, nvm and so on), asked once. The shell gets
+ * only HOME, USER, LOGNAME, SHELL, a basic PATH and TERM, and only the PATH it prints is kept: no
+ * other variable its startup files set reaches a command. Undefined when it cannot be read in time.
+ */
+function resolveLoginPath({ shellFile, home, user, spawn, kill = (pid, signal) => process.kill(pid, signal), clock, timeoutMs = 5000 }) {
+  return new Promise(resolve => {
+    if (!LOGIN_PATH_SHELLS.includes(path.posix.basename(shellFile || ''))) { resolve(undefined); return; }
+    let out = '';
+    let done = false;
+    let child;
+    let timer;
+    const finish = value => {
+      if (done) return;
+      done = true;
+      clock.clearTimeout(timer);
+      resolve(value);
+    };
+    try {
+      child = spawn(shellFile, ['-l', '-c', `printf "\\n${PATH_MARK}%s\\n" "$PATH"`], {
+        cwd: home, env: { HOME: home, USER: user, LOGNAME: user, SHELL: shellFile, PATH: DEFAULT_PATH, TERM: 'dumb' },
+        stdio: ['ignore', 'pipe', 'ignore'], detached: true, windowsHide: true,
+      });
+    } catch {
+      resolve(undefined);
+      return;
+    }
+    timer = clock.setTimeout(() => {
+      try { kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+      finish(undefined);
+    }, timeoutMs);
+    child.stdout?.on('data', chunk => { out = (out + chunk).slice(-65536); });
+    child.on('error', () => finish(undefined));
+    child.on('close', () => {
+      const found = [...out.matchAll(new RegExp(`^${PATH_MARK}(.*)$`, 'gm'))].pop();
+      finish(found ? cleanSearchPath(found[1], 'macos') || undefined : undefined);
+    });
+  });
+}
 
 /** Output can arrive a moment after the shell exits; a background process that keeps it open is not waited for. */
 const EXIT_GRACE_MS = 2000;
@@ -160,4 +203,4 @@ function startRun({
   return { pid: child.pid, stop, done };
 }
 
-module.exports = { EXIT_GRACE_MS, KILL_GRACE_MS, killTree, startRun };
+module.exports = { EXIT_GRACE_MS, KILL_GRACE_MS, killTree, resolveLoginPath, startRun };

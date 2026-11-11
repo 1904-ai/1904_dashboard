@@ -5,12 +5,13 @@ const policy = require('../computer-policy.cjs');
 const {
   validateRequest, placeFor, folderName, defaultFolder, folderChoiceProblem, computerShell, commandPlan,
   powershellScript, powershellLiteral, decodePowerShell, createTail, createClixmlDecoder, createAllowance,
-  finalUpdate, runningUpdate, visibleText, defaultComputerName, childEnvironment, computerPlatform,
+  finalUpdate, runningUpdate, visibleText, defaultComputerName, commandEnvironment, computerPlatform,
 } = policy;
 
 const request = (overrides = {}) => ({
   id: 'req_000000001', kind: 'run', messageId: 'msg_000000001',
   command: 'uname -a', timeoutSeconds: 30, reason: 'Check the macOS version.',
+  access: 'sandbox', network: false, origin: { kind: 'desktop' },
   app: { id: 'app_1', name: 'Shop', repo: 'shop' },
   task: { id: 'task_1', title: 'Fix the login page' },
   sender: { id: 'user_1', name: 'Dana' },
@@ -38,6 +39,13 @@ test('the mirrored limits match 1904’s contract', () => {
   assert.deepEqual([...policy.COMPUTER_STATUSES], ['pending', 'delivered', 'running', 'done', 'declined', 'failed', 'timeout', 'cancelled', 'expired']);
   assert.deepEqual([...policy.COMPUTER_FINAL_STATUSES], ['done', 'declined', 'failed', 'timeout', 'cancelled', 'expired']);
   assert.deepEqual([...policy.DESKTOP_FINAL_STATUSES], ['done', 'declined', 'failed', 'timeout', 'cancelled'], 'only 1904 sets expired');
+  assert.deepEqual([...policy.COMPUTER_ACCESS], ['sandbox', 'full']);
+  assert.equal(policy.COMPUTER_PAIRING_IDLE_MS, 30 * 24 * 60 * 60_000);
+  assert.equal(policy.COMPUTER_PROOF_HEADER, 'x-1904-computer-proof');
+  assert.equal(policy.COMPUTER_PROOF_SKEW_MS, 120_000);
+  assert.equal(policy.COMPUTER_OWN_MESSAGE_MS, 6 * 60 * 60_000);
+  assert.deepEqual([...policy.COMPUTER_AWAY_MINUTES], [30, 60, 120, 240, 480]);
+  assert.deepEqual({ ...policy.COMPUTER_AWAY_MAX_COMMANDS }, { min: 1, max: 200, default: 50 });
   assert.equal(policy.computerId('abcdefgh'), 'abcdefgh');
   for (const id of ['short', 'has space1', 'a'.repeat(65), 7]) assert.equal(policy.computerId(id), undefined, String(id));
 });
@@ -51,6 +59,10 @@ test('a well-formed request is accepted as a clean copy', () => {
   assert.equal(validateRequest(request({ timeoutSeconds: 1 })).request.timeoutSeconds, 5);
   assert.equal(validateRequest(request({ timeoutSeconds: undefined })).request.timeoutSeconds, 120);
   assert.equal(validateRequest(request({ cwd: '' })).request.cwd, undefined);
+  assert.deepEqual([checked.request.access, checked.request.network, checked.request.origin], ['sandbox', false, { kind: 'desktop' }]);
+  const away = validateRequest(request({ access: 'full', network: true, origin: { kind: 'away', leaseId: 'lease_00000001', extra: 1 } })).request;
+  assert.deepEqual([away.access, away.network, away.origin], ['full', true, { kind: 'away', leaseId: 'lease_00000001' }]);
+  assert.equal(validateRequest(request({ access: undefined })).request.access, 'sandbox', 'an older 1904 that names no access gets the sandbox');
 });
 
 test('a malformed request is refused, with its id when it has one', () => {
@@ -68,6 +80,11 @@ test('a malformed request is refused, with its id when it has one', () => {
     [{ app: { id: 'app_1', name: 'Shop' } }, /which app/],
     [{ sender: 'Dana' }, /which app, task and person/],
     [{ expiresAt: 'soon' }, /expiry/],
+    [{ access: 'root' }, /access level/],
+    [{ network: 'yes' }, /network/],
+    [{ origin: undefined }, /did not send this message/],
+    [{ origin: { kind: 'browser' } }, /did not send this message/],
+    [{ origin: { kind: 'away' } }, /did not send this message/],
   ]) {
     const checked = validateRequest(request(overrides));
     assert.equal(checked.ok, false, JSON.stringify(overrides));
@@ -126,17 +143,72 @@ test('a chosen folder may be anywhere except a drive root or a folder holding th
   assert.equal(folderChoiceProblem('D:\\code\\shop', win), undefined);
   assert.match(folderChoiceProblem('D:\\', win), /whole drive/);
   assert.match(folderChoiceProblem('c:\\users\\Dana', win), /home folder/);
+  assert.match(folderChoiceProblem('C:\\Users\\dana\\AppData\\Roaming\\x', win), /AppData/);
+  assert.match(folderChoiceProblem('C:\\Users\\dana\\.config\\x', win), /hidden folders/);
+  assert.equal(folderChoiceProblem('C:\\Users\\dana\\code\\.hidden\\x', win), undefined);
 });
 
-test('macOS runs the login shell with -l -c', () => {
+test('on macOS a folder the sandbox protects is never an app’s folder', () => {
+  const mac = { platform: 'macos', home: '/Users/dana', userData: '/Users/dana/Library/Application Support/1904 Desktop' };
+  for (const folder of ['/Users/dana/Library', '/Users/dana/Library/Developer/shop', '/Users/dana/.ssh', '/Users/dana/.config/shop', '/Users/dana/.cache',
+    '/Users/dana/Library/Application Support/1904 Desktop/x']) {
+    assert.ok(folderChoiceProblem(folder, mac), folder);
+  }
+  assert.equal(folderChoiceProblem('/Users/dana/Documents/code/shop', mac), undefined, 'a checkout in Documents is fine');
+  assert.match(folderChoiceProblem('/Users/dana/sh\nop', mac), /on this computer/);
+});
+
+test('notification text is spelled out like the prompt and marked where it was cut', () => {
+  assert.equal(policy.shortLine('rm -rf \u202Eevil', 60), 'rm -rf <U+202E>evil');
+  assert.equal(policy.shortLine('a\nb', 60), 'a<U+000A>b');
+  const cut = policy.shortLine('x'.repeat(200), 120);
+  assert.equal(cut.length, 120);
+  assert.ok(cut.endsWith('…'));
+  assert.equal(policy.shortLine('short', 120), 'short');
+});
+
+test('shells start without reading any startup file', () => {
   const zsh = computerShell({ platform: 'macos', env: { SHELL: '/bin/zsh' } });
   assert.deepEqual(zsh, { kind: 'posix', file: '/bin/zsh', name: 'zsh' });
   assert.equal(computerShell({ platform: 'macos', env: {} }).file, '/bin/zsh');
   assert.equal(computerShell({ platform: 'macos', env: { SHELL: 'zsh' } }).file, '/bin/zsh', 'a relative $SHELL is not trusted');
   assert.equal(computerShell({ platform: 'macos', env: { SHELL: '/opt/homebrew/bin/fish' } }).name, 'fish');
   assert.deepEqual(commandPlan({ shell: zsh, command: 'echo "$HOME" && uname' }),
-    { file: '/bin/zsh', args: ['-l', '-c', 'echo "$HOME" && uname'], detached: true, clixml: false });
-  assert.deepEqual(commandPlan({ shell: { kind: 'posix', file: '/bin/tcsh' }, command: 'pwd' }).args, ['-c', 'pwd']);
+    { file: '/bin/zsh', args: ['-f', '-c', 'echo "$HOME" && uname'], detached: true, clixml: false, shellFile: '/bin/zsh' });
+  const args = file => commandPlan({ shell: { kind: 'posix', file }, command: 'pwd' });
+  assert.deepEqual(args('/bin/bash').args, ['--noprofile', '--norc', '-c', 'pwd']);
+  assert.deepEqual(args('/opt/homebrew/bin/fish').args, ['--no-config', '-c', 'pwd']);
+  assert.deepEqual(args('/bin/tcsh').args, ['-f', '-c', 'pwd']);
+  assert.deepEqual(args('/bin/sh').args, ['-c', 'pwd']);
+  assert.deepEqual([args('/usr/local/bin/xonsh').file, args('/usr/local/bin/xonsh').args], ['/bin/zsh', ['-f', '-c', 'pwd']], 'an unknown shell is replaced');
+  for (const plan of ['/bin/zsh', '/bin/bash', '/bin/sh', '/bin/tcsh'].map(args)) assert.ok(!plan.args.includes('-l'), 'never a login shell');
+  const sandboxed = commandPlan({ shell: { kind: 'posix', file: '/opt/homebrew/bin/fish' }, command: 'ls', sandbox: { file: '/usr/bin/sandbox-exec', args: ['-D', 'P0=/x', '-p', '(version 1)'] } });
+  assert.deepEqual(sandboxed, {
+    file: '/usr/bin/sandbox-exec', args: ['-D', 'P0=/x', '-p', '(version 1)', '/bin/zsh', '-f', '-c', 'ls'], detached: true, clixml: false, shellFile: '/bin/zsh',
+  }, 'the sandbox always runs /bin/zsh -f');
+});
+
+test('a command gets a small environment of its own, never 1904 Desktop’s tokens', () => {
+  const parent = {
+    PATH: '/usr/bin:/bin', HOME: '/Users/dana', USER: 'dana', LOGNAME: 'dana', SHELL: '/bin/zsh', LANG: 'en_GB.UTF-8',
+    LC_CTYPE: 'UTF-8', TERM: 'xterm-256color', GITHUB_TOKEN: 'ghp_secret', AWS_SECRET_ACCESS_KEY: 'aws', SSH_AUTH_SOCK: '/tmp/agent',
+    NODE_OPTIONS: '--require /tmp/x.js', DYLD_INSERT_LIBRARIES: '/tmp/x.dylib', ELECTRON_RUN_AS_NODE: '1', TMPDIR: '/var/folders/x',
+  };
+  assert.deepEqual(commandEnvironment({ platform: 'macos', env: parent, searchPath: '/opt/homebrew/bin:.:relative:/usr/bin', tempDir: '/private/tmp/run', shellFile: '/bin/zsh' }), {
+    PATH: '/opt/homebrew/bin:/usr/bin', HOME: '/Users/dana', USER: 'dana', LOGNAME: 'dana', LANG: 'en_GB.UTF-8', LC_CTYPE: 'UTF-8',
+    SHELL: '/bin/zsh', TERM: 'xterm-256color', TMPDIR: '/private/tmp/run',
+  });
+  assert.equal(commandEnvironment({ platform: 'macos', env: {}, tempDir: '/t', shellFile: '/bin/zsh' }).PATH, policy.DEFAULT_PATH);
+  assert.equal(commandEnvironment({ platform: 'macos', env: { TERM: 'x; rm' }, tempDir: '/t', shellFile: '/bin/zsh' }).TERM, 'dumb');
+  const windows = commandEnvironment({ platform: 'windows', tempDir: 'C:\\Temp\\run', env: {
+    Path: 'C:\\Windows\\system32;.;C:\\Tools', SystemRoot: 'C:\\Windows', windir: 'C:\\Windows', ComSpec: 'C:\\Windows\\system32\\cmd.exe',
+    PATHEXT: '.COM;.EXE', USERPROFILE: 'C:\\Users\\dana', APPDATA: 'a', LOCALAPPDATA: 'l', ProgramData: 'p', ProgramFiles: 'f',
+    'ProgramFiles(x86)': 'f86', HOMEDRIVE: 'C:', HOMEPATH: '\\Users\\dana', PROCESSOR_ARCHITECTURE: 'AMD64', NUMBER_OF_PROCESSORS: '8', OS: 'Windows_NT',
+    GITHUB_TOKEN: 'ghp_secret', OPENAI_API_KEY: 'sk', TEMP: 'C:\\Users\\dana\\AppData\\Local\\Temp', PSModulePath: 'x',
+  } });
+  assert.deepEqual(Object.keys(windows).sort(), ['APPDATA', 'ComSpec', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'NUMBER_OF_PROCESSORS', 'OS', 'PATHEXT',
+    'PROCESSOR_ARCHITECTURE', 'Path', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'SystemRoot', 'TEMP', 'TMP', 'USERPROFILE', 'windir'].sort());
+  assert.deepEqual([windows.Path, windows.TEMP, windows.TMP], ['C:\\Windows\\system32;C:\\Tools', 'C:\\Temp\\run', 'C:\\Temp\\run']);
 });
 
 test('Windows prefers pwsh.exe on PATH, else the built-in powershell.exe', () => {
@@ -253,6 +325,13 @@ test('"Allow for this message" covers the same message in the same folder, and n
   assert.equal(allowance.covers(validateRequest(request({ task: { id: 'task_2', title: 'Other' } })).request, inside), false, 'not another task');
   assert.equal(allowance.covers(validateRequest(request({ app: { id: 'app_2', name: 'Blog', repo: 'blog' } })).request, inside), false, 'not another app');
   assert.equal(allowance.allow(first, { ...inside, outside: true }), false, 'an outside request cannot be allowed for the message');
+  const online = validateRequest(request({ id: 'req_000000004', network: true })).request;
+  assert.equal(allowance.covers(online, inside), false, 'internet access needs its own yes');
+  allowance.allow(first, inside, true);
+  assert.equal(allowance.covers(online, inside), true, 'unless the person allowed it with the message');
+  const full = validateRequest(request({ id: 'req_000000005', access: 'full' })).request;
+  assert.equal(allowance.covers(full, inside), false, 'full access is never covered');
+  assert.equal(allowance.allow(full, inside), false);
   now = 1001;
   assert.equal(allowance.covers(later, inside), false, 'it does not last');
   allowance.allow(first, inside);
@@ -323,11 +402,10 @@ test('look-alike characters are named with their code points', () => {
   assert.equal(many[20], 'and 5 more');
 });
 
-test('the computer’s default name, platform and environment', () => {
+test('the computer’s default name and platform', () => {
   assert.equal(defaultComputerName('Danas-MacBook-Pro.local'), 'Danas-MacBook-Pro');
   assert.equal(defaultComputerName('STUDIO-PC'), 'STUDIO-PC');
   assert.equal(defaultComputerName(''), 'My computer');
   assert.equal(defaultComputerName('x'.repeat(80)).length, 60);
   assert.deepEqual(['darwin', 'win32', 'linux'].map(computerPlatform), ['macos', 'windows', undefined]);
-  assert.deepEqual(childEnvironment({ PATH: '/bin', ELECTRON_RUN_AS_NODE: '1', electron_no_attach_console: '1', HOME: '/h' }), { PATH: '/bin', HOME: '/h' });
 });
