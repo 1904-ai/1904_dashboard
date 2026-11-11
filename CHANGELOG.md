@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Right-click works: cut, copy, paste and select all in text boxes, copy selected text, open a link in your browser or copy its address, copy an image, and fix a misspelled word or add it to the dictionary.
+- **Open Copied 1904 Link** opens the copied link instead of showing a JavaScript error.
+
 ## 0.3.2
 
 - When 1904 can’t be reached, the window says so and keeps trying on its own, then returns to the page you were on. No error page, and nothing to click unless you want to retry sooner.

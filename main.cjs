@@ -5,6 +5,7 @@ const { startUpdater } = require('./updater.cjs');
 const { SCHEME, IMPORT_PATH, taskUrl, repositorySetupUrl, readLink, startSignIn } = require('./desktop-links.cjs');
 const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
 const { CRASH_WINDOW_MS, retryDelay, isServerFailure, retryTarget, recoveryView } = require('./desktop-recovery.cjs');
+const { installContextMenu } = require('./context-menu.cjs');
 
 const ORIGIN = 'https://1904.ai';
 const AGENTS = `${ORIGIN}/agents`;
@@ -194,8 +195,11 @@ async function explainSocialSignIn(contents) {
   }
 }
 
-function openCopiedLink() {
-  const url = webUrl(clipboard.readText().trim());
+// The main-process clipboard is asynchronous since Electron 45. Never rejects, so callers needn't wait.
+async function openCopiedLink() {
+  const copied = await Promise.resolve().then(() => clipboard.readText()).catch(() => '');
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const url = webUrl(String(copied ?? '').trim());
   const isTaskLink = url?.pathname === '/agents' || url?.pathname === '/agents-beta2';
   const isEmailLink = url?.pathname === '/api/auth/magic/verify' && url.searchParams.has('token');
   if (url?.origin !== ORIGIN || !(isTaskLink || isEmailLink)) {
@@ -526,7 +530,13 @@ if (!app.requestSingleInstanceLock()) {
   if (app.isPackaged) app.setAsDefaultProtocolClient(SCHEME);
   const fromArgs = args => args.map(value => readLink(value, ORIGIN)).find(Boolean);
   queuedLink = fromArgs(process.argv);
-  app.on('web-contents-created', (_event, contents) => installNavigationRules(contents));
+  app.on('web-contents-created', (_event, contents) => {
+    installNavigationRules(contents);
+    installContextMenu(contents, {
+      Menu, clipboard, openBrowser,
+      windowFor: (target) => (target === dashboardContents ? mainWindow : BrowserWindow.fromWebContents(target)),
+    });
+  });
   app.on('open-url', (event, url) => { event.preventDefault(); handleLink(readLink(url, ORIGIN)); });
   app.on('second-instance', (_event, args) => { if (!handleLink(fromArgs(args)) && desktopReady) showDashboard(); });
   app.on('activate', () => { if (desktopReady) showDashboard(); });

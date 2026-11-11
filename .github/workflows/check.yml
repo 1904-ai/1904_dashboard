@@ -22,7 +22,7 @@ jobs:
           node-version: '22'
           package-manager-cache: false
       - run: npm run check
-      - run: node --test test/desktop-links.test.cjs test/desktop-recovery.test.cjs
+      - run: node --test test/desktop-links.test.cjs test/desktop-recovery.test.cjs test/context-menu.test.cjs
 
   secret-scan:
     runs-on: ubuntu-latest
