@@ -1,9 +1,22 @@
-const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeTheme, Notification, powerMonitor, screen, session, shell } = require('electron');
-const { readFileSync } = require('node:fs');
+const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, screen, session, shell, systemPreferences } = require('electron');
+const { spawn } = require('node:child_process');
+const { existsSync, readFileSync, realpathSync } = require('node:fs');
+const { mkdir, mkdtemp, realpath, rm, stat } = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
+const { fileURLToPath } = require('node:url');
 const { startUpdater } = require('./updater.cjs');
 const { SCHEME, IMPORT_PATH, taskUrl, repositorySetupUrl, readLink, startSignIn } = require('./desktop-links.cjs');
 const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
+const { CRASH_WINDOW_MS, retryDelay, isServerFailure, retryTarget, recoveryView } = require('./desktop-recovery.cjs');
+const { installContextMenu } = require('./context-menu.cjs');
+const computerPolicy = require('./computer-policy.cjs');
+const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
+const { createComputerBridge } = require('./computer-bridge.cjs');
+const { createDialogAsk, fullAccessConfirmation } = require('./computer-approval.cjs');
+const computerProof = require('./computer-proof.cjs');
+const { awayBudgetPrompt, awayConfirmPrompt, awayDurationPrompt, createAwayLeases } = require('./computer-away.cjs');
+const { createActivityLog } = require('./computer-log.cjs');
 
 const ORIGIN = 'https://1904.ai';
 const AGENTS = `${ORIGIN}/agents`;
@@ -15,6 +28,7 @@ const PALETTE = {
   light: { color: '#f6f8fa', symbolColor: '#20262d' },
 };
 const DASHBOARD_CSS = readFileSync(path.join(__dirname, 'dashboard.css'), 'utf8');
+const ACTIVITY_PAGE = path.join(__dirname, 'activity.html');
 const SOCIAL_AUTH = new Set([
   'https://accounts.google.com/o/oauth2/v2/auth',
   'https://github.com/login/oauth/authorize',
@@ -39,8 +53,34 @@ let signInAttempt;
 let queuedLink;
 let desktopReady = false;
 let loginReturnTo = '/agents';
+// Set while the dashboard cannot be shown: { kind, url, attempts, trying, timer }.
+let recovery;
+let lastCrashAt = 0;
+// A Cloudflare challenge answers with an error status but is a page the person must see.
+let challengeUrl;
 const notices = new Map();
 const notified = new Set();
+let menuUpdates;
+let updateReady = false;
+// Use My Computer (see the section below main's window code).
+let computerLink;
+let computerBridge;
+let computerConnecting;
+let computerQuitting = false;
+let computerMenuKey;
+let activityWindow;
+let activityStateTimer;
+let activityStateDirty = false;
+let activityOutputTimer;
+let activityOutputSeq = 0;
+const activityOutput = [];
+const computerNotices = new Set();
+let computerMessages;
+let computerLog;
+// webRequest id → the proof header for a message the dashboard is sending (see stampMessage).
+const pendingProofs = new Map();
+// The person's last real key press or click in the dashboard window: a message is stamped only right after one.
+const computerInput = computerProof.createInputTracker();
 
 function webUrl(value) {
   try {
@@ -65,9 +105,58 @@ function openBrowser(url) {
 
 function loadPage(contents, url) {
   if (contents && !contents.isDestroyed() && is1904(url)) {
+    // Opening anything while the dashboard is down is itself the next attempt.
+    if (recovery && contents === dashboardContents) {
+      clearTimeout(recovery.timer);
+      recovery = { ...recovery, url, attempts: recovery.attempts + 1, trying: true, timer: undefined };
+      sendRecovery();
+    }
     // Chromium reports main-frame load errors through did-fail-load below.
     void contents.loadURL(url).catch(() => {});
   }
+}
+
+function fallbackUrl() {
+  return loginReturnTo === IMPORT_PATH ? ORIGIN + IMPORT_PATH : taskUrl(loginReturnTo, ORIGIN)?.href || AGENTS;
+}
+
+function sendRecovery() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('1904:chrome-recovery', recoveryView(recovery));
+}
+
+// The dashboard could not be loaded. Hide its view (an error page helps nobody), say what is
+// happening in the window itself, and keep trying behind it until a page loads.
+function startRecovery(kind, failedUrl) {
+  if (!mainWindow || mainWindow.isDestroyed() || !dashboardContents || dashboardContents.isDestroyed()) return;
+  clearTimeout(recovery?.timer);
+  const attempts = recovery?.attempts ?? 0;
+  if (!recovery) {
+    setTaskTitleBar(false);
+    dashboardTheme = undefined;
+    syncTitleBar();
+    dashboardView.setVisible(false);
+    if (mainWindow.isFocused()) mainWindow.webContents.focus();
+  }
+  recovery = {
+    kind, attempts, trying: false,
+    url: retryTarget(failedUrl, ORIGIN, fallbackUrl()),
+    // A page that crashes twice is not retried on a timer: it would crash in a loop.
+    timer: kind === 'crashed' ? undefined : setTimeout(retryNow, retryDelay(attempts)),
+  };
+  sendRecovery();
+}
+
+function retryNow() {
+  if (recovery) loadPage(dashboardContents, recovery.url);
+}
+
+function endRecovery() {
+  if (!recovery) return;
+  clearTimeout(recovery.timer);
+  recovery = undefined;
+  if (dashboardView) dashboardView.setVisible(true);
+  sendRecovery();
+  if (mainWindow?.isFocused() && dashboardContents && !dashboardContents.isDestroyed()) dashboardContents.focus();
 }
 
 function openTask(target) {
@@ -107,12 +196,14 @@ function handleLink(link) {
   if (!attempt || attempt.state !== link.state || attempt.expiresAt <= Date.now()) return false;
   signInAttempt = undefined;
   showDashboard();
+  // A pending retry must not navigate away from the sign-in exchange.
+  clearTimeout(recovery?.timer);
   const data = new URLSearchParams({ code: link.code, state: link.state, verifier: attempt.verifier, returnTo: attempt.returnTo });
   void dashboardContents.loadURL(ORIGIN + '/api/auth/desktop/exchange', {
     postData: [{ type: 'rawData', bytes: Buffer.from(data.toString()) }],
     extraHeaders: 'Content-Type: application/x-www-form-urlencoded\r\nX-1904-Desktop-Exchange: 1\r\n',
   }).catch(() => {
-    // Main-frame network failures are handled by the offline page.
+    // Main-frame network failures are handled by did-fail-load.
   });
   return true;
 }
@@ -137,8 +228,11 @@ async function explainSocialSignIn(contents) {
   }
 }
 
-function openCopiedLink() {
-  const url = webUrl(clipboard.readText().trim());
+// The main-process clipboard is asynchronous since Electron 45. Never rejects, so callers needn't wait.
+async function openCopiedLink() {
+  const copied = await Promise.resolve().then(() => clipboard.readText()).catch(() => '');
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const url = webUrl(String(copied ?? '').trim());
   const isTaskLink = url?.pathname === '/agents' || url?.pathname === '/agents-beta2';
   const isEmailLink = url?.pathname === '/api/auth/magic/verify' && url.searchParams.has('token');
   if (url?.origin !== ORIGIN || !(isTaskLink || isEmailLink)) {
@@ -201,10 +295,49 @@ function installNavigationRules(contents) {
   });
 }
 
+// Use My Computer, the origin rule: a request reaching the dashboard's own session from its own main frame.
+function fromDashboard(details) {
+  const frame = details.frame;
+  const main = dashboardContents?.mainFrame;
+  // Without a frame it cannot be shown to come from the dashboard's main frame: no.
+  return Boolean(dashboardContents) && !dashboardContents.isDestroyed() && details.webContentsId === dashboardContents.id &&
+    is1904(dashboardContents.getURL()) && details.initiatorOrigin === ORIGIN &&
+    Boolean(frame && main && frame.processId === main.processId && frame.routingId === main.routingId);
+}
+
+// A message the person sends from this window gets a proof only this process can make. The proof
+// covers the exact bytes sent; the header is added in onBeforeSendHeaders, after the page let go.
+async function stampMessage(profile, details) {
+  if (!computerLink?.info() || !computerProof.stampableRequest({ method: details.method, url: details.url, origin: ORIGIN }) || !fromDashboard(details)) return;
+  try {
+    const body = await computerProof.uploadBody(details.uploadData, id => profile.getBlobData(id));
+    const message = body && computerProof.messageInBody(body);
+    if (!message) return;
+    // A message the page sent with no key press or click just before is not the person's: it leaves unstamped.
+    const decision = computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && dashboardContents.isFocused() });
+    if (!decision.stamp) {
+      computerLog?.note({ text: decision.reason, messageId: message.messageId, taskId: message.taskId });
+      return;
+    }
+    const keys = await computerLink.proof();
+    if (!keys) return;
+    const now = Date.now();
+    for (const [id, entry] of pendingProofs) if (now - entry.at > 60_000) pendingProofs.delete(id);
+    pendingProofs.set(details.id, { header: computerProof.proofHeader({ ...keys, ms: now, body }), message, at: now });
+  } catch {
+    // An unstamped message simply cannot use this computer.
+  }
+}
+
 function installPermissionRules() {
   const profile = session.fromPartition(PARTITION);
-  profile.webRequest.onBeforeRequest({ urls: [`${ORIGIN}/login*`] }, (details, callback) => {
+  // One listener per event and session: the sign-in redirect and the message proof share it.
+  profile.webRequest.onBeforeRequest({ urls: [`${ORIGIN}/login*`, `${ORIGIN}/api/apps/*`] }, (details, callback) => {
     const url = new URL(details.url);
+    if (url.pathname.startsWith('/api/')) {
+      void stampMessage(profile, details).finally(() => callback({}));
+      return;
+    }
     if (details.resourceType === 'mainFrame' && details.method === 'GET' &&
         url.pathname === '/login' && !url.searchParams.has('returnTo')) {
       url.searchParams.set('returnTo', loginReturnTo);
@@ -212,6 +345,24 @@ function installPermissionRules() {
     } else {
       callback({});
     }
+  });
+  // No page can send a proof of its own; only a message stamped above leaves with one.
+  profile.webRequest.onBeforeSendHeaders({ urls: [`${ORIGIN}/*`] }, (details, callback) => {
+    const requestHeaders = computerProof.withoutProof(details.requestHeaders);
+    const proof = pendingProofs.get(details.id);
+    pendingProofs.delete(details.id);
+    if (proof && fromDashboard(details)) {
+      requestHeaders[computerPolicy.COMPUTER_PROOF_HEADER] = proof.header;
+      computerMessages?.record(proof.message.messageId, proof.message.taskId);
+    }
+    callback({ requestHeaders });
+  });
+  profile.webRequest.onHeadersReceived({ urls: [`${ORIGIN}/*`], types: ['mainFrame'] }, (details, callback) => {
+    if (details.webContentsId === dashboardContents?.id) {
+      const challenged = Object.keys(details.responseHeaders ?? {}).some(name => name.toLowerCase() === 'cf-mitigated');
+      challengeUrl = challenged ? details.url : undefined;
+    }
+    callback({});
   });
   const ordinaryPermissions = new Set(['clipboard-sanitized-write', 'fullscreen', 'notifications']);
   profile.setPermissionCheckHandler((contents, permission, origin, details) => {
@@ -225,33 +376,18 @@ function installPermissionRules() {
   });
 }
 
-function offlinePage() {
-  const retryUrl = loginReturnTo === IMPORT_PATH ? ORIGIN + IMPORT_PATH : taskUrl(loginReturnTo, ORIGIN)?.href || AGENTS;
-  const retry = retryUrl.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
-  const html = `<!doctype html><html lang="en"><meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-    <meta name="viewport" content="width=device-width, initial-scale=1"><title>1904 Desktop</title>
-    <style>
-      :root { color-scheme: dark light; font: 16px system-ui; }
-      body { min-height: 100vh; margin: 0; display: grid; place-items: center; }
-      main { max-width: 27rem; padding: 2rem; }
-      header { font-size: .8rem; font-weight: 700; letter-spacing: .13em; }
-      h1 { font-size: 2rem; letter-spacing: -.04em; margin: .7rem 0; }
-      p { line-height: 1.55; margin-bottom: 1.8rem; }
-      a { color: Canvas; background: CanvasText; text-decoration: none; padding: .6rem 1rem; border-radius: .45rem; }
-    </style><main><header>1904 DESKTOP</header><h1>Couldn’t reach 1904</h1>
-    <p>Check your connection, then try again.</p><a href="${retry}">Try again</a></main></html>`;
-  return `data:text/html;base64,${Buffer.from(html).toString('base64')}`;
-}
-
 function activeTheme() {
   return dashboardTheme ?? (nativeTheme.shouldUseDarkColors ? 'dark' : 'light');
 }
 
 function syncTitleBar() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
   const theme = activeTheme();
   const palette = PALETTE[theme];
+  if (activityWindow && !activityWindow.isDestroyed()) {
+    activityWindow.setBackgroundColor(palette.color);
+    activityWindow.webContents.send('1904:activity-theme', theme);
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.setBackgroundColor(palette.color);
   if (process.platform !== 'darwin') mainWindow.setTitleBarOverlay({ ...palette, height: CHROME_HEIGHT });
   mainWindow.webContents.send('1904:chrome-theme', theme);
@@ -321,8 +457,12 @@ function installChromeHandlers() {
     notice.show();
     return true;
   });
+  ipcMain.on('1904:recovery-retry', (event) => {
+    if (mainWindow && event.sender === mainWindow.webContents && event.senderFrame === event.sender.mainFrame) retryNow();
+  });
   powerMonitor.on('resume', () => {
-    if (is1904(dashboardContents?.getURL())) dashboardContents.send('1904:resume');
+    if (recovery) { if (recovery.kind !== 'crashed') retryNow(); }
+    else if (is1904(dashboardContents?.getURL())) dashboardContents.send('1904:resume');
   });
 }
 
@@ -349,6 +489,9 @@ function createWindow() {
   dashboardView = view;
   const contents = view.webContents;
   dashboardContents = contents;
+  // Real input reaches these from the operating system; events a page dispatches itself never do.
+  contents.on('before-input-event', (_event, input) => computerInput.key(input));
+  contents.on('input-event', (_event, input) => computerInput.pointer(input));
   view.setBackgroundColor(palette.color);
   win.contentView.addChildView(view);
   win.on('resize', sizeDashboard);
@@ -364,30 +507,38 @@ function createWindow() {
       dashboardContents = undefined;
       dashboardTheme = undefined;
       taskTitleBar = false;
+      clearTimeout(recovery?.timer);
+      recovery = undefined;
     }
   });
-  win.webContents.on('dom-ready', syncTitleBar);
+  win.webContents.on('dom-ready', () => { syncTitleBar(); sendRecovery(); sendComputerIndicator(); });
   void win.loadFile(path.join(__dirname, 'chrome.html'));
 
-  contents.on('did-navigate', () => setTaskTitleBar(false));
+  contents.on('did-navigate', (_event, url, httpResponseCode) => {
+    setTaskTitleBar(false);
+    if (!is1904(url)) return;
+    // Not emitted for Chromium's own error pages, so this is always a real answer from 1904.
+    if (isServerFailure(httpResponseCode) && url !== challengeUrl) startRecovery('unavailable', url);
+    else endRecovery();
+  });
   contents.on('did-navigate-in-page', () => {
     if (!isTaskTitleBarPage(contents.getURL())) setTaskTitleBar(false);
   });
   contents.on('dom-ready', () => {
     if (is1904(contents.getURL())) void contents.insertCSS(DASHBOARD_CSS).catch(() => {});
-    if (win.isFocused()) contents.focus();
+    if (!recovery && win.isFocused()) contents.focus();
   });
-  const showOffline = () => {
-    if (contents.isDestroyed()) return;
-    setTaskTitleBar(false);
-    dashboardTheme = undefined;
-    syncTitleBar();
-    void contents.loadURL(offlinePage()).catch(() => {});
-  };
   contents.on('did-fail-load', (_event, code, _description, url, isMainFrame) => {
-    if (isMainFrame && code !== -3 && is1904(url)) showOffline();
+    if (isMainFrame && code !== -3 && is1904(url)) startRecovery(net.isOnline() ? 'unreachable' : 'offline', url);
   });
-  contents.on('render-process-gone', showOffline);
+  contents.on('render-process-gone', (_event, details) => {
+    if (contents.isDestroyed() || details.reason === 'clean-exit') return;
+    const repeated = Date.now() - lastCrashAt < CRASH_WINDOW_MS;
+    lastCrashAt = Date.now();
+    // The first crash is reloaded without a word; only a page that keeps crashing is shown as broken.
+    if (repeated) startRecovery('crashed', contents.getURL());
+    else loadPage(contents, retryTarget(contents.getURL(), ORIGIN, fallbackUrl()));
+  });
   const link = queuedLink;
   queuedLink = undefined;
   if (!handleLink(link)) loadPage(contents, AGENTS);
@@ -419,8 +570,33 @@ function showReleaseNotes() {
   });
 }
 
-function installMenu(updates) {
+function computerMenu() {
+  if (!computerBridge) return [];
+  const info = computerLink.info();
+  // A Windows menu label treats & as a shortcut marker.
+  const menuText = text => process.platform === 'win32' ? String(text).replace(/&/g, '&&') : String(text);
+  const paused = computerLink.paused();
+  return [
+    { type: 'separator' },
+    info
+      ? { label: 'Use My Computer', submenu: [
+        { label: `Connected as ${menuText(info.name)}`, enabled: false },
+        { type: 'separator' },
+        { label: paused ? 'Resume Use My Computer' : 'Pause Use My Computer', click: () => setComputerPaused(!paused) },
+        ...computerBridge.away().map(lease => ({
+          label: `End Away Mode for ${menuText(computerPolicy.label(lease.taskTitle, 40))}`, click: () => computerBridge.endAway(lease.id),
+        })),
+        { type: 'separator' },
+        { label: 'Disconnect This Computer…', click: () => { void disconnectComputer(); } },
+      ] }
+      : { label: 'Use My Computer…', click: () => { void connectComputer(); } },
+    { label: 'Computer Activity', click: () => showActivity() },
+  ];
+}
+
+function installMenu() {
   const mac = process.platform === 'darwin';
+  const updates = menuUpdates;
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(mac ? [{ role: 'appMenu' }] : []),
     { label: '1904', submenu: [
@@ -428,13 +604,15 @@ function installMenu(updates) {
       { label: 'Open Copied 1904 Link', accelerator: 'CmdOrCtrl+Shift+O', click: () => { showDashboard(); openCopiedLink(); } },
       { label: 'Sign In with Browser…', click: beginBrowserSignIn },
       { label: 'Open in Browser', click: () => openBrowser(AGENTS) },
+      ...computerMenu(),
       ...(mac ? [] : [{ type: 'separator' }, { role: 'quit' }]),
     ] },
     { role: 'editMenu' },
     { label: 'View', submenu: [
       { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: (_item, win) => {
         const contents = win && win !== mainWindow ? win.webContents : dashboardContents;
-        if (contents && is1904(contents.getURL())) contents.reload();
+        if (recovery && contents === dashboardContents) retryNow();
+        else if (contents && is1904(contents.getURL())) contents.reload();
         else { showDashboard(); loadPage(dashboardContents, AGENTS); }
       } },
       { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: () => dashboardContents?.setZoomLevel(0) },
@@ -448,7 +626,7 @@ function installMenu(updates) {
       { label: 'What’s New', click: showReleaseNotes },
       ...(updates ? [
         { label: 'Check for Updates…', click: updates.check },
-        { label: 'Restart to Update…', id: '1904-restart-update', visible: false, click: updates.install },
+        { label: 'Restart to Update…', id: '1904-restart-update', visible: updateReady, click: updates.install },
       ] : []),
       { type: 'separator' },
       { label: '1904 Website', click: () => openBrowser(`${ORIGIN}/`) },
@@ -457,6 +635,415 @@ function installMenu(updates) {
       { label: 'Import repository…', click: openRepositoryImport },
     ] },
   ]));
+}
+
+// ── Use My Computer ────────────────────────────────────────────────────────
+// A task's agent can ask to run a command on this computer. Once the person connects the
+// computer, this main process polls 1904 for those requests, answers only those for messages
+// this window sent (or inside away mode started here), asks the person natively, runs what they
+// approve in the sandbox, shows it in Computer Activity and sends the output back. The dashboard
+// page can only read whether this computer is connected and start connecting it or start away
+// mode (the person confirms each); it can never run, approve or read anything. The token and the
+// proof key never leave this process.
+
+function computerPlatform() {
+  return computerPolicy.computerPlatform(process.platform);
+}
+
+function computerState() {
+  const info = computerLink?.info();
+  return info
+    ? { connected: true, id: info.id, name: info.name, platform: computerPlatform(), paused: computerLink.paused() }
+    : { connected: false, paused: false };
+}
+
+// Why a folder cannot be an app's folder here, for a new choice and for every saved one read back.
+function computerFolderProblem(folder) {
+  return computerPolicy.folderChoiceProblem(folder, {
+    platform: computerPlatform(), home: os.homedir(), userData: app.getPath('userData'), realpath: realpathSync,
+  });
+}
+
+function setComputerPaused(paused) {
+  computerBridge?.setPaused(paused);
+  computerChanged();
+}
+
+// Touch ID where the Mac has it; otherwise the dialogs the person just answered are the confirmation.
+async function confirmWithTouchId(reason) {
+  if (process.platform !== 'darwin' || !systemPreferences.canPromptTouchID?.()) return undefined;
+  try {
+    await systemPreferences.promptTouchID(reason);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Full access: Touch ID, or a second dialog whose default is Cancel.
+async function confirmFullAccess(request) {
+  const touched = await confirmWithTouchId('run a command with full access');
+  if (touched !== undefined) return touched;
+  return (await messageBox(fullAccessConfirmation(request), computerParent())).response === 1;
+}
+
+// Away mode's questions: how long and whether with internet, then the command budget.
+async function awayChoice({ taskTitle }) {
+  const parent = computerParent();
+  const duration = awayDurationPrompt(taskTitle);
+  const first = await messageBox(duration, parent);
+  const minutes = duration.minutes[first.response];
+  if (!minutes) return undefined;
+  const budget = awayBudgetPrompt();
+  const second = await messageBox(budget, parent);
+  const maxCommands = budget.budgets[second.response];
+  if (!maxCommands) return undefined;
+  return { minutes, network: first.checkboxChecked === true, maxCommands };
+}
+
+// Started from the dashboard's own page: the person still answers every question here.
+async function startAwayFromDashboard(input) {
+  if (!computerBridge || !computerLink.info()) return computerState();
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  if (computerPlatform() !== 'macos') {
+    await messageBox({
+      type: 'info', title: 'Away mode', message: 'Away mode isn’t available on this computer yet',
+      detail: 'Away mode runs commands in a sandbox, which 1904 Desktop has only on macOS for now.', buttons: ['OK'],
+    }, parent);
+    return computerState();
+  }
+  const taskId = typeof input?.taskId === 'string' && /^[a-f0-9]{32}$/.test(input.taskId) ? input.taskId : undefined;
+  const appId = typeof input?.appId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(input.appId) ? input.appId : undefined;
+  if (!taskId || !appId) return computerState();
+  // Like a stamped message: only right after the person typed or clicked in the window, with it in front.
+  if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) return computerState();
+  const started = await computerBridge.startAway({ taskId, appId, taskTitle: computerPolicy.label(input.taskTitle, 200) || 'Task' });
+  if (!started.ok && started.message) {
+    await messageBox({ type: 'info', title: 'Away mode', message: 'Away mode didn’t start', detail: started.message, buttons: ['OK'] }, parent);
+  }
+  computerChanged();
+  return computerState();
+}
+
+function computerNotice(title, body) {
+  if (!Notification.isSupported()) return;
+  const notice = new Notification({ title, body });
+  computerNotices.add(notice);
+  const forget = () => computerNotices.delete(notice);
+  notice.once('click', () => { forget(); showActivity(); });
+  notice.once('close', forget);
+  notice.once('failed', forget);
+  notice.show();
+}
+
+// What the person hears about away mode while they may not be at the computer. Text from 1904 or the
+// agent is spelled out the way the prompt shows it, and marked where it was cut.
+function onComputerNotice(notice) {
+  const task = computerPolicy.shortLine(notice.lease?.taskTitle ?? notice.request?.task.title ?? 'a task', 60);
+  if (notice.kind === 'away-run') {
+    computerNotice(`Ran a command for “${task}”`, `${computerPolicy.shortLine(notice.request.command, 120)}\nAway mode: ${notice.lease.maxCommands - notice.lease.used} commands left.`);
+  } else if (notice.kind === 'away-started') {
+    const until = new Date(notice.lease.endsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    computerNotice('Away mode is on', `“${task}” can run sandboxed commands here until ${until}.`);
+  } else if (notice.kind === 'away-ended') {
+    const why = { time: 'Its time is up.', budget: 'It used its command budget.', elsewhere: 'It was ended from 1904.', desktop: 'You ended it.' }[notice.reason] || '';
+    computerNotice('Away mode ended', `“${task}”. ${why}`.trim());
+  }
+  computerChanged();
+}
+
+// Through the dashboard's own session, so these requests carry its sign-in and its Cloudflare clearance.
+function sessionFetch(url, init) {
+  return session.fromPartition(PARTITION).fetch(url, init);
+}
+
+function messageBox(options, parent) {
+  return parent && !parent.isDestroyed() ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+}
+
+// Prompts belong to the dashboard window; without one they sit on Computer Activity. A parentless
+// prompt on macOS would block this process, and with it every running command's output.
+function computerParent() {
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+  return showActivity({ focus: false });
+}
+
+function isActivityPage(url) {
+  try {
+    const file = fileURLToPath(url);
+    return process.platform === 'win32' ? file.toLowerCase() === ACTIVITY_PAGE.toLowerCase() : file === ACTIVITY_PAGE;
+  } catch {
+    return false;
+  }
+}
+
+function isActivitySender(event) {
+  return Boolean(activityWindow) && !activityWindow.isDestroyed() && event.sender === activityWindow.webContents &&
+    event.senderFrame === event.sender.mainFrame && isActivityPage(event.senderFrame?.url);
+}
+
+function isComputerDashboardSender(event) {
+  return Boolean(dashboardContents) && event.sender === dashboardContents && event.senderFrame === event.sender.mainFrame &&
+    is1904(event.senderFrame?.url);
+}
+
+function showActivity({ focus = true } = {}) {
+  if (activityWindow && !activityWindow.isDestroyed()) {
+    if (focus) {
+      if (activityWindow.isMinimized()) activityWindow.restore();
+      activityWindow.show();
+      activityWindow.focus();
+    } else if (!activityWindow.isVisible()) {
+      activityWindow.showInactive();
+    }
+    return activityWindow;
+  }
+  const win = new BrowserWindow({
+    title: 'Computer Activity', icon: ICON, width: 760, height: 680, minWidth: 420, minHeight: 320,
+    backgroundColor: PALETTE[activeTheme()].color, autoHideMenuBar: true, show: false,
+    webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'activity-preload.cjs') },
+  });
+  activityWindow = win;
+  win.on('closed', () => { if (activityWindow === win) activityWindow = undefined; });
+  win.webContents.on('dom-ready', () => win.webContents.send('1904:activity-theme', activeTheme()));
+  void win.loadFile(ACTIVITY_PAGE);
+  if (focus) win.show();
+  else win.showInactive();
+  return win;
+}
+
+function computerFolders() {
+  if (!computerBridge) return [];
+  const chosen = computerLink.folders.all();
+  const apps = new Map(computerBridge.apps().map(appRef => [appRef.id, appRef]));
+  for (const [id, entry] of Object.entries(chosen)) {
+    if (!apps.has(id)) apps.set(id, { id, name: entry.name || 'App', repo: entry.repo || '' });
+  }
+  return [...apps.values()].map(appRef => ({
+    appId: appRef.id, name: computerPolicy.visibleLine(appRef.name), repo: appRef.repo,
+    path: computerPolicy.visibleLine(computerBridge.describe({ app: appRef }).root), chosen: Object.hasOwn(chosen, appRef.id),
+  }));
+}
+
+function activityState(output) {
+  if (!computerBridge) {
+    return { connection: { connected: false, text: 'Use My Computer is available in 1904 Desktop for macOS and Windows.' }, runs: [], history: [], away: [], folders: [] };
+  }
+  return { ...computerBridge.snapshot({ output }), folders: computerFolders() };
+}
+
+function sendActivityState() {
+  clearTimeout(activityStateTimer);
+  activityStateTimer = undefined;
+  if (!activityStateDirty) return;
+  activityStateDirty = false;
+  if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send('1904:activity-state', activityState(false));
+}
+
+// Output goes to the window in small batches. Each batch is numbered, so the window can skip
+// what its first full snapshot already contained.
+function flushActivityOutput() {
+  clearTimeout(activityOutputTimer);
+  activityOutputTimer = undefined;
+  sendActivityState();
+  if (!activityOutput.length) return;
+  const chunks = [];
+  for (const chunk of activityOutput.splice(0)) {
+    const last = chunks[chunks.length - 1];
+    if (last?.id === chunk.id && last.stream === chunk.stream) last.text += chunk.text;
+    else chunks.push({ ...chunk });
+  }
+  activityOutputSeq++;
+  if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send('1904:activity-output', { seq: activityOutputSeq, chunks });
+}
+
+function queueComputerOutput(id, stream, text) {
+  activityOutput.push({ id, stream, text });
+  activityOutputTimer ??= setTimeout(flushActivityOutput, 100);
+}
+
+function sendComputerIndicator() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('1904:chrome-computer', computerBridge?.running() ?? 0);
+}
+
+function computerChanged() {
+  sendComputerIndicator();
+  const key = JSON.stringify([computerState(), computerBridge?.away().map(lease => lease.id)]);
+  if (key !== computerMenuKey) {
+    computerMenuKey = key;
+    installMenu();
+  }
+  activityStateDirty = true;
+  activityStateTimer ??= setTimeout(sendActivityState, 50);
+}
+
+function focusComputerPrompt() {
+  if (mainWindow && !mainWindow.isDestroyed()) showDashboard();
+  else showActivity();
+}
+
+// The prompt is up but the person may be elsewhere: say so where they will see it.
+function computerAttention(request) {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : activityWindow;
+  if (parent && !parent.isDestroyed() && parent.isFocused()) return;
+  if (process.platform === 'win32' && parent && !parent.isDestroyed()) parent.flashFrame(true);
+  if (!Notification.isSupported()) return;
+  const sender = computerPolicy.shortLine(request.sender.name || 'Someone', 60);
+  const notice = new Notification({ title: `${sender} wants to run a command on this computer`, body: 'Open 1904 Desktop to review it.' });
+  computerNotices.add(notice);
+  const forget = () => computerNotices.delete(notice);
+  notice.once('click', () => { forget(); focusComputerPrompt(); });
+  notice.once('close', forget);
+  notice.once('failed', forget);
+  notice.show();
+}
+
+async function chooseComputerFolder(appRef, parent) {
+  if (!computerBridge || !appRef?.id) return false;
+  const current = computerBridge.describe({ app: appRef }).root;
+  const options = {
+    title: `Choose a folder for ${appRef.name}`, buttonLabel: 'Use This Folder',
+    defaultPath: existsSync(current) ? current : path.dirname(current),
+    properties: ['openDirectory', 'createDirectory'],
+  };
+  const { canceled, filePaths } = parent && !parent.isDestroyed() ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  const folder = filePaths?.[0];
+  if (canceled || !folder) return false;
+  const problem = computerFolderProblem(folder);
+  if (problem) {
+    await messageBox({ type: 'warning', title: 'Use My Computer', message: 'Choose another folder', detail: problem, buttons: ['OK'] }, parent);
+    return false;
+  }
+  computerLink.folders.set(appRef.id, folder, appRef);
+  computerChanged();
+  return true;
+}
+
+function connectComputer() {
+  if (!computerBridge) return Promise.resolve(computerState());
+  computerConnecting ??= (async () => {
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+    try {
+      const platform = computerPlatform();
+      const connected = await pairComputer({
+        link: computerLink, fetch: sessionFetch, origin: ORIGIN,
+        computer: {
+          name: computerPolicy.defaultComputerName(os.hostname()), platform, appVersion: app.getVersion(),
+          shell: computerPolicy.computerShell({ platform, env: process.env, exists: existsSync }).name,
+        },
+        confirm: async name => (await messageBox(connectPrompt(name), parent)).response === 1,
+        notice: ({ message, detail }) => messageBox({ type: 'info', title: 'Use My Computer', message, detail, buttons: ['OK'] }, parent),
+      });
+      if (connected) computerBridge.start();
+    } catch (error) {
+      console.warn('1904 Desktop could not connect this computer:', error?.message);
+    } finally {
+      computerConnecting = undefined;
+      computerChanged();
+    }
+    return computerState();
+  })();
+  return computerConnecting;
+}
+
+async function disconnectComputer() {
+  if (!computerBridge || !computerLink.info()) return;
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const { response } = await messageBox({
+    type: 'question', title: 'Use My Computer', message: 'Disconnect this computer from 1904?',
+    detail: 'Tasks can no longer ask to run commands here, a command that is running now is stopped, ' +
+      'and 1904 stops accepting this computer’s key.',
+    buttons: ['Cancel', 'Disconnect'], defaultId: 0, cancelId: 0, noLink: true,
+  }, parent);
+  if (response !== 1) return;
+  const confirmed = await computerBridge.disconnect();
+  computerChanged();
+  if (!confirmed) {
+    await messageBox({
+      type: 'info', title: 'Use My Computer', message: 'This computer is disconnected',
+      detail: '1904 couldn’t be reached, so this computer may still be listed in 1904 Settings. Its key is gone from here; remove it under Computers in 1904 Settings when you can.',
+      buttons: ['OK'],
+    }, mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined);
+  }
+}
+
+function startComputer() {
+  const platform = computerPlatform();
+  if (!platform) return;
+  const userData = app.getPath('userData');
+  computerLink = createComputerLink({ dir: userData, safeStorage, folderProblem: computerFolderProblem });
+  computerMessages = computerProof.createMessageLog({ file: path.join(userData, 'computer-messages.json') });
+  let username = '';
+  try { username = os.userInfo().username; } catch { /* left empty */ }
+  computerBridge = createComputerBridge({
+    origin: ORIGIN, fetch: sessionFetch, link: computerLink, platform, home: os.homedir(), user: username, env: process.env,
+    messages: computerMessages,
+    leases: createAwayLeases({ file: path.join(userData, 'computer-away.json') }),
+    log: computerLog = createActivityLog({ file: path.join(userData, 'computer-activity.jsonl') }),
+    userData, tmpRoot: os.tmpdir(), exists: existsSync, realpathSync,
+    fs: { mkdir, stat, mkdtemp, rm, realpath }, spawn, kill: (pid, signal) => process.kill(pid, signal),
+    clock: { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: timer => clearTimeout(timer) },
+    ask: createDialogAsk({
+      computerName: () => computerLink.info()?.name || computerPolicy.defaultComputerName(os.hostname()),
+      showMessageBox: (view, signal) => messageBox({
+        type: view.full ? 'warning' : 'question', title: view.title, message: view.message, detail: view.detail, buttons: view.buttons,
+        defaultId: view.defaultId, cancelId: view.cancelId, noLink: true, signal,
+        ...(view.checkboxLabel ? { checkboxLabel: view.checkboxLabel, checkboxChecked: false } : {}),
+      }, computerParent()),
+      chooseFolder: appRef => chooseComputerFolder(appRef, computerParent()),
+      attention: computerAttention,
+      confirmFull: confirmFullAccess,
+    }),
+    awayChoice,
+    // true, false, or undefined where there is no Touch ID; then confirmLease asks once more.
+    confirmPresence: confirmWithTouchId,
+    confirmLease: async lease => (await messageBox(awayConfirmPrompt(lease), computerParent())).response === 1,
+    onChange: computerChanged,
+    onOutput: queueComputerOutput,
+    onDisconnected: computerChanged,
+    onNotice: onComputerNotice,
+  });
+  powerMonitor.on('suspend', () => computerBridge.suspend());
+  powerMonitor.on('resume', () => computerBridge.resume());
+  computerBridge.start();
+}
+
+function installComputerHandlers() {
+  ipcMain.handle('1904:computer-state', event => isComputerDashboardSender(event) ? computerState() : null);
+  ipcMain.handle('1904:computer-connect', event => isComputerDashboardSender(event) ? connectComputer() : null);
+  ipcMain.handle('1904:computer-away', (event, input) => isComputerDashboardSender(event) ? startAwayFromDashboard(input) : null);
+  ipcMain.on('1904:computer-activity', (event) => {
+    if (isComputerDashboardSender(event)) showActivity();
+  });
+  ipcMain.on('1904:show-computer-activity', (event) => {
+    if (mainWindow && event.sender === mainWindow.webContents && event.senderFrame === event.sender.mainFrame) showActivity();
+  });
+  ipcMain.handle('1904:activity-snapshot', (event) => {
+    if (!isActivitySender(event)) return null;
+    flushActivityOutput();
+    return { seq: activityOutputSeq, ...activityState(true) };
+  });
+  ipcMain.on('1904:activity-stop', (event, id) => {
+    if (isActivitySender(event) && computerPolicy.computerId(id)) computerBridge?.stopRun(id);
+  });
+  ipcMain.on('1904:activity-end-away', (event, id) => {
+    if (isActivitySender(event) && computerPolicy.computerId(id)) computerBridge?.endAway(id);
+  });
+  ipcMain.on('1904:activity-pause', (event, paused) => {
+    if (isActivitySender(event) && typeof paused === 'boolean' && computerLink?.info()) setComputerPaused(paused);
+  });
+  ipcMain.handle('1904:activity-folder', async (event, appId, action) => {
+    if (!isActivitySender(event) || typeof appId !== 'string') return false;
+    const folder = computerFolders().find(entry => entry.appId === appId);
+    if (!folder) return false;
+    if (action === 'reset') {
+      const reset = computerLink.folders.reset(appId);
+      computerChanged();
+      return reset;
+    }
+    if (action === 'change') return chooseComputerFolder({ id: appId, name: folder.name, repo: folder.repo }, activityWindow);
+    return false;
+  });
 }
 
 app.setName('1904 Desktop');
@@ -468,18 +1055,34 @@ if (!app.requestSingleInstanceLock()) {
   if (app.isPackaged) app.setAsDefaultProtocolClient(SCHEME);
   const fromArgs = args => args.map(value => readLink(value, ORIGIN)).find(Boolean);
   queuedLink = fromArgs(process.argv);
-  app.on('web-contents-created', (_event, contents) => installNavigationRules(contents));
+  app.on('web-contents-created', (_event, contents) => {
+    installNavigationRules(contents);
+    installContextMenu(contents, {
+      Menu, clipboard, openBrowser,
+      windowFor: (target) => (target === dashboardContents ? mainWindow : BrowserWindow.fromWebContents(target)),
+    });
+  });
   app.on('open-url', (event, url) => { event.preventDefault(); handleLink(readLink(url, ORIGIN)); });
   app.on('second-instance', (_event, args) => { if (!handleLink(fromArgs(args)) && desktopReady) showDashboard(); });
   app.on('activate', () => { if (desktopReady) showDashboard(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+  // Commands still running on this computer are stopped, and 1904 told, before the app goes.
+  app.on('before-quit', (event) => {
+    if (computerQuitting || !computerBridge?.busy()) return;
+    event.preventDefault();
+    computerQuitting = true;
+    void computerBridge.shutdown().finally(() => app.quit());
+  });
   void app.whenReady().then(() => {
     installPermissionRules();
-    installMenu(startUpdater(() => mainWindow, () => {
-      const restart = Menu.getApplicationMenu()?.getMenuItemById('1904-restart-update');
-      if (restart) restart.visible = true;
-    }));
+    menuUpdates = startUpdater(() => mainWindow, () => {
+      updateReady = true;
+      installMenu();
+    });
+    startComputer();
+    installMenu();
     installChromeHandlers();
+    installComputerHandlers();
     desktopReady = true;
     showDashboard();
   });

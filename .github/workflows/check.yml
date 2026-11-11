@@ -22,7 +22,7 @@ jobs:
           node-version: '22'
           package-manager-cache: false
       - run: npm run check
-      - run: node --test test/desktop-links.test.cjs
+      - run: node --test test/desktop-links.test.cjs test/desktop-recovery.test.cjs test/computer-policy.test.cjs test/computer-approval.test.cjs test/computer-link.test.cjs test/computer-sandbox.test.cjs test/computer-proof.test.cjs test/computer-away.test.cjs test/computer-log.test.cjs test/computer-bridge.test.cjs test/computer-runner.test.cjs test/context-menu.test.cjs
 
   secret-scan:
     runs-on: ubuntu-latest

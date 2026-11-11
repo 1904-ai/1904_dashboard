@@ -5,8 +5,8 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'">
   <title>1904 Desktop</title>
   <style>
-    :root { color-scheme: dark; --canvas: #121416; --text: #e2e7ec; --line: #ffffff18; --hover: #ffffff14; }
-    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --text: #20262d; --line: #00000016; --hover: #0000000c; }
+    :root { color-scheme: dark; --canvas: #121416; --text: #e2e7ec; --line: #ffffff18; --hover: #ffffff14; --edge: #ffffff38; }
+    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --text: #20262d; --line: #00000016; --hover: #0000000c; --edge: #00000030; }
     body { margin: 0; background: var(--canvas); color: var(--text); font: 500 12px system-ui, sans-serif; overflow: hidden; }
     header { box-sizing: border-box; height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 150px 0 12px;
       border-bottom: 1px solid var(--line); -webkit-app-region: drag; user-select: none; }
@@ -17,7 +17,23 @@
       padding: 0; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
     button:hover, button:focus-visible { background: var(--hover); }
     button:focus-visible { outline: 1px solid currentColor; outline-offset: 1px; }
-    @media (forced-colors: active) { header { border-color: CanvasText; } }
+    main { box-sizing: border-box; height: calc(100vh - 44px); display: grid; place-items: center; padding: 24px;
+      font-size: 14px; font-weight: 400; text-align: center; }
+    main[hidden] { display: none; }
+    main section { max-width: 26rem; }
+    main h1 { margin: 14px 0 8px; font-size: 20px; font-weight: 650; letter-spacing: -.02em; }
+    main p { margin: 0; line-height: 1.55; opacity: .78; }
+    #recovery-status { min-height: 1.55em; margin-top: 14px; font-size: 12px; opacity: .6; }
+    #recovery-retry { width: auto; height: auto; margin: 16px auto 0; padding: 7px 14px; border: 1px solid var(--edge);
+      font: 550 13px system-ui, sans-serif; }
+    #recovery-retry:disabled { opacity: .5; cursor: default; }
+    .signal { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #d9a441; }
+    [data-trying] .signal { animation: signal 1.6s ease-in-out infinite; }
+    @keyframes signal { 50% { opacity: .25; } }
+    #computer-activity[hidden] { display: none; }
+    #computer-activity .signal { background: #4fb477; animation: signal 1.6s ease-in-out infinite; }
+    @media (prefers-reduced-motion: reduce) { [data-trying] .signal, #computer-activity .signal { animation: none; } }
+    @media (forced-colors: active) { header { border-color: CanvasText; } .signal, #computer-activity .signal { background: CanvasText; } }
   </style>
 </head>
 <body>
@@ -29,6 +45,21 @@
         <circle cx="3" cy="8" r="1.15"/><circle cx="8" cy="8" r="1.15"/><circle cx="13" cy="8" r="1.15"/>
       </svg>
     </button>
+    <!-- Shown while a command runs on this computer; opens Computer Activity. -->
+    <button type="button" id="computer-activity" hidden aria-label="A command is running on this computer. Open Computer Activity."
+      title="A command is running on this computer. Open Computer Activity.">
+      <span class="signal" aria-hidden="true"></span>
+    </button>
   </header>
+  <!-- Shown while the dashboard cannot be loaded; the dashboard view is hidden and retried behind it. -->
+  <main id="recovery" hidden>
+    <section>
+      <span class="signal" aria-hidden="true"></span>
+      <h1 id="recovery-title"></h1>
+      <p id="recovery-detail"></p>
+      <p id="recovery-status" role="status"></p>
+      <button type="button" id="recovery-retry"></button>
+    </section>
+  </main>
 </body>
 </html>

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'">
+  <title>Computer Activity</title>
+  <style>
+    :root { color-scheme: dark; --canvas: #121416; --panel: #181b1e; --text: #e2e7ec; --muted: #9aa5b0; --line: #ffffff18;
+      --hover: #ffffff14; --edge: #ffffff38; --code: #0b0d0f; --error: #f0a19c; --run: #5cc489; --wait: #d9a441; --bad: #e5706b; }
+    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --panel: #ffffff; --text: #20262d; --muted: #59636e; --line: #00000016;
+      --hover: #0000000c; --edge: #00000030; --code: #eef1f4; --error: #b42318; --run: #1f7a46; --wait: #8a5d00; --bad: #b42318; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--text); font: 400 13px/1.45 system-ui, sans-serif; }
+    header { position: sticky; top: 0; z-index: 1; padding: 14px 18px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+    .header-row { display: flex; align-items: center; gap: 12px; }
+    .header-row button { margin-left: auto; }
+    #pause[hidden], #away-section[hidden], #history-section[hidden] { display: none; }
+    .away { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border: 1px solid var(--wait); border-radius: 8px; background: var(--panel); padding: 8px 12px; }
+    .away-title { font-weight: 600; }
+    .away-detail { flex: 1 1 240px; color: var(--muted); }
+    .access { font-size: 11px; font-weight: 600; color: var(--muted); }
+    .access[data-full] { color: var(--bad); }
+    details { margin-top: 8px; }
+    summary { cursor: pointer; color: var(--muted); }
+    #connection { margin: 4px 0 0; color: var(--muted); }
+    main { padding: 4px 18px 24px; }
+    h2 { margin: 18px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+    .empty, .hint { margin: 0 0 8px; color: var(--muted); }
+    .empty[hidden] { display: none; }
+    ol, ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+    .run { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 10px 12px; }
+    .run-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .badge { flex: none; font-size: 11px; font-weight: 650; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--edge); }
+    .run[data-status="running"] .badge { color: var(--run); border-color: currentColor; }
+    .run:is([data-status="waiting"], [data-status="starting"]) .badge { color: var(--wait); border-color: currentColor; }
+    .run:is([data-status="failed"], [data-status="timeout"]) .badge { color: var(--bad); border-color: currentColor; }
+    .run-title { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+    .run-meta { color: var(--muted); }
+    .run-head button { margin-left: auto; }
+    pre { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--code); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap; overflow-wrap: anywhere; }
+    .output { max-height: 320px; overflow: auto; }
+    .output[hidden] { display: none; }
+    .output .stderr { color: var(--error); }
+    .note { margin: 6px 0 0; color: var(--muted); overflow-wrap: anywhere; }
+    .note[hidden] { display: none; }
+    .outside { color: var(--bad); }
+    .result { margin: 6px 0 0; font-weight: 550; }
+    .result[hidden] { display: none; }
+    .folder { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 8px 12px; }
+    .folder-name { font-weight: 600; }
+    .folder-path { flex: 1 1 260px; min-width: 0; color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+    .folder-kind { font-size: 11px; color: var(--muted); }
+    button { font: 550 12px system-ui, sans-serif; color: inherit; background: transparent; border: 1px solid var(--edge); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+    button:hover, button:focus-visible { background: var(--hover); }
+    button:focus-visible { outline: 1px solid currentColor; outline-offset: 1px; }
+    button:disabled { opacity: .5; cursor: default; }
+    @media (prefers-reduced-motion: no-preference) { .run[data-status="running"] .badge::before { content: ""; display: inline-block; width: 6px; height: 6px;
+      margin: 0 5px 1px 0; border-radius: 50%; background: currentColor; animation: pulse 1.6s ease-in-out infinite; } }
+    @keyframes pulse { 50% { opacity: .25; } }
+    @media (forced-colors: active) { .run, .folder, pre { border: 1px solid CanvasText; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-row">
+      <h1>Computer Activity</h1>
+      <button type="button" id="pause" hidden></button>
+    </div>
+    <p id="connection" role="status"></p>
+  </header>
+  <main>
+    <section aria-labelledby="away-title" id="away-section" hidden>
+      <h2 id="away-title">Away mode</h2>
+      <ul id="away"></ul>
+    </section>
+    <section aria-labelledby="runs-title">
+      <h2 id="runs-title">Commands</h2>
+      <p id="runs-empty" class="empty">Commands that a task’s agent asks to run on this computer appear here with their output. Nothing runs until you approve it or start away mode.</p>
+      <ol id="runs"></ol>
+    </section>
+    <section aria-labelledby="history-title" id="history-section" hidden>
+      <h2 id="history-title">Earlier on this computer</h2>
+      <p class="hint">1904 Desktop keeps its own record of the last 1,000 commands on this computer, with the end of their output.</p>
+      <ol id="history"></ol>
+    </section>
+    <section aria-labelledby="folders-title">
+      <h2 id="folders-title">App folders</h2>
+      <p class="hint">An app’s commands start in its folder. Change it to use another folder on this computer, such as an existing checkout.</p>
+      <p id="folders-empty" class="empty">Apps appear here after their first request.</p>
+      <ul id="folders"></ul>
+    </section>
+  </main>
+</body>
+</html>
