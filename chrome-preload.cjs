@@ -17,11 +17,32 @@ function showRecovery() {
   panel.toggleAttribute('data-trying', recovery.trying);
 }
 
+// How many commands are running on this computer (Use My Computer).
+let computerRunning = 0;
+
+function showComputerActivity() {
+  const button = document.getElementById('computer-activity');
+  if (!button) return;
+  button.hidden = computerRunning === 0;
+  const text = computerRunning > 1
+    ? `${computerRunning} commands are running on this computer. Open Computer Activity.`
+    : 'A command is running on this computer. Open Computer Activity.';
+  button.title = text;
+  button.setAttribute('aria-label', text);
+}
+
 window.addEventListener('DOMContentLoaded', () => {
   document.documentElement.dataset.platform = process.platform;
   document.getElementById('app-menu').addEventListener('click', () => ipcRenderer.send('1904:show-menu'));
   document.getElementById('recovery-retry').addEventListener('click', () => ipcRenderer.send('1904:recovery-retry'));
+  document.getElementById('computer-activity').addEventListener('click', () => ipcRenderer.send('1904:show-computer-activity'));
   showRecovery();
+  showComputerActivity();
+});
+
+ipcRenderer.on('1904:chrome-computer', (_event, running) => {
+  computerRunning = Number.isInteger(running) && running > 0 ? running : 0;
+  showComputerActivity();
 });
 
 ipcRenderer.on('1904:chrome-theme', (_event, theme) => {

@@ -30,8 +30,10 @@
     .signal { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #d9a441; }
     [data-trying] .signal { animation: signal 1.6s ease-in-out infinite; }
     @keyframes signal { 50% { opacity: .25; } }
-    @media (prefers-reduced-motion: reduce) { [data-trying] .signal { animation: none; } }
-    @media (forced-colors: active) { header { border-color: CanvasText; } .signal { background: CanvasText; } }
+    #computer-activity[hidden] { display: none; }
+    #computer-activity .signal { background: #4fb477; animation: signal 1.6s ease-in-out infinite; }
+    @media (prefers-reduced-motion: reduce) { [data-trying] .signal, #computer-activity .signal { animation: none; } }
+    @media (forced-colors: active) { header { border-color: CanvasText; } .signal, #computer-activity .signal { background: CanvasText; } }
   </style>
 </head>
 <body>
@@ -42,6 +44,11 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
         <circle cx="3" cy="8" r="1.15"/><circle cx="8" cy="8" r="1.15"/><circle cx="13" cy="8" r="1.15"/>
       </svg>
+    </button>
+    <!-- Shown while a command runs on this computer; opens Computer Activity. -->
+    <button type="button" id="computer-activity" hidden aria-label="A command is running on this computer. Open Computer Activity."
+      title="A command is running on this computer. Open Computer Activity.">
+      <span class="signal" aria-hidden="true"></span>
     </button>
   </header>
   <!-- Shown while the dashboard cannot be loaded; the dashboard view is hidden and retried behind it. -->

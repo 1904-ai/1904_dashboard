@@ -1,11 +1,19 @@
-const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeTheme, net, Notification, powerMonitor, screen, session, shell } = require('electron');
-const { readFileSync } = require('node:fs');
+const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, screen, session, shell } = require('electron');
+const { spawn } = require('node:child_process');
+const { existsSync, readFileSync } = require('node:fs');
+const { mkdir, stat } = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
+const { fileURLToPath } = require('node:url');
 const { startUpdater } = require('./updater.cjs');
 const { SCHEME, IMPORT_PATH, taskUrl, repositorySetupUrl, readLink, startSignIn } = require('./desktop-links.cjs');
 const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
 const { CRASH_WINDOW_MS, retryDelay, isServerFailure, retryTarget, recoveryView } = require('./desktop-recovery.cjs');
 const { installContextMenu } = require('./context-menu.cjs');
+const computerPolicy = require('./computer-policy.cjs');
+const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
+const { createComputerBridge } = require('./computer-bridge.cjs');
+const { createDialogAsk } = require('./computer-approval.cjs');
 
 const ORIGIN = 'https://1904.ai';
 const AGENTS = `${ORIGIN}/agents`;
@@ -17,6 +25,7 @@ const PALETTE = {
   light: { color: '#f6f8fa', symbolColor: '#20262d' },
 };
 const DASHBOARD_CSS = readFileSync(path.join(__dirname, 'dashboard.css'), 'utf8');
+const ACTIVITY_PAGE = path.join(__dirname, 'activity.html');
 const SOCIAL_AUTH = new Set([
   'https://accounts.google.com/o/oauth2/v2/auth',
   'https://github.com/login/oauth/authorize',
@@ -48,6 +57,21 @@ let lastCrashAt = 0;
 let challengeUrl;
 const notices = new Map();
 const notified = new Set();
+let menuUpdates;
+let updateReady = false;
+// Use My Computer (see the section below main's window code).
+let computerLink;
+let computerBridge;
+let computerConnecting;
+let computerQuitting = false;
+let computerMenuKey;
+let activityWindow;
+let activityStateTimer;
+let activityStateDirty = false;
+let activityOutputTimer;
+let activityOutputSeq = 0;
+const activityOutput = [];
+const computerNotices = new Set();
 
 function webUrl(value) {
   try {
@@ -298,9 +322,13 @@ function activeTheme() {
 }
 
 function syncTitleBar() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
   const theme = activeTheme();
   const palette = PALETTE[theme];
+  if (activityWindow && !activityWindow.isDestroyed()) {
+    activityWindow.setBackgroundColor(palette.color);
+    activityWindow.webContents.send('1904:activity-theme', theme);
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.setBackgroundColor(palette.color);
   if (process.platform !== 'darwin') mainWindow.setTitleBarOverlay({ ...palette, height: CHROME_HEIGHT });
   mainWindow.webContents.send('1904:chrome-theme', theme);
@@ -421,7 +449,7 @@ function createWindow() {
       recovery = undefined;
     }
   });
-  win.webContents.on('dom-ready', () => { syncTitleBar(); sendRecovery(); });
+  win.webContents.on('dom-ready', () => { syncTitleBar(); sendRecovery(); sendComputerIndicator(); });
   void win.loadFile(path.join(__dirname, 'chrome.html'));
 
   contents.on('did-navigate', (_event, url, httpResponseCode) => {
@@ -480,8 +508,27 @@ function showReleaseNotes() {
   });
 }
 
-function installMenu(updates) {
+function computerMenu() {
+  if (!computerBridge) return [];
+  const info = computerLink.info();
+  // A Windows menu label treats & as a shortcut marker.
+  const name = process.platform === 'win32' ? info?.name.replace(/&/g, '&&') : info?.name;
+  return [
+    { type: 'separator' },
+    info
+      ? { label: 'Use My Computer', submenu: [
+        { label: `Connected as ${name}`, enabled: false },
+        { type: 'separator' },
+        { label: 'Disconnect This Computer…', click: () => { void disconnectComputer(); } },
+      ] }
+      : { label: 'Use My Computer…', click: () => { void connectComputer(); } },
+    { label: 'Computer Activity', click: () => showActivity() },
+  ];
+}
+
+function installMenu() {
   const mac = process.platform === 'darwin';
+  const updates = menuUpdates;
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(mac ? [{ role: 'appMenu' }] : []),
     { label: '1904', submenu: [
@@ -489,6 +536,7 @@ function installMenu(updates) {
       { label: 'Open Copied 1904 Link', accelerator: 'CmdOrCtrl+Shift+O', click: () => { showDashboard(); openCopiedLink(); } },
       { label: 'Sign In with Browser…', click: beginBrowserSignIn },
       { label: 'Open in Browser', click: () => openBrowser(AGENTS) },
+      ...computerMenu(),
       ...(mac ? [] : [{ type: 'separator' }, { role: 'quit' }]),
     ] },
     { role: 'editMenu' },
@@ -510,7 +558,7 @@ function installMenu(updates) {
       { label: 'What’s New', click: showReleaseNotes },
       ...(updates ? [
         { label: 'Check for Updates…', click: updates.check },
-        { label: 'Restart to Update…', id: '1904-restart-update', visible: false, click: updates.install },
+        { label: 'Restart to Update…', id: '1904-restart-update', visible: updateReady, click: updates.install },
       ] : []),
       { type: 'separator' },
       { label: '1904 Website', click: () => openBrowser(`${ORIGIN}/`) },
@@ -519,6 +567,294 @@ function installMenu(updates) {
       { label: 'Import repository…', click: openRepositoryImport },
     ] },
   ]));
+}
+
+// ── Use My Computer ────────────────────────────────────────────────────────
+// A task's agent can ask to run a command on this computer. Once the person connects the
+// computer, this main process polls 1904 for those requests, asks the person natively, runs what
+// they approve, shows it in Computer Activity and sends the output back. The dashboard page can
+// only read whether this computer is connected and start connecting it (the person confirms);
+// it can never run, approve or read anything. The token never leaves this process.
+
+function computerPlatform() {
+  return computerPolicy.computerPlatform(process.platform);
+}
+
+function computerState() {
+  const info = computerLink?.info();
+  return info ? { connected: true, id: info.id, name: info.name, platform: computerPlatform() } : { connected: false };
+}
+
+// Through the dashboard's own session, so these requests carry its sign-in and its Cloudflare clearance.
+function sessionFetch(url, init) {
+  return session.fromPartition(PARTITION).fetch(url, init);
+}
+
+function messageBox(options, parent) {
+  return parent && !parent.isDestroyed() ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+}
+
+// Prompts belong to the dashboard window; without one they sit on Computer Activity. A parentless
+// prompt on macOS would block this process, and with it every running command's output.
+function computerParent() {
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+  return showActivity({ focus: false });
+}
+
+function isActivityPage(url) {
+  try {
+    const file = fileURLToPath(url);
+    return process.platform === 'win32' ? file.toLowerCase() === ACTIVITY_PAGE.toLowerCase() : file === ACTIVITY_PAGE;
+  } catch {
+    return false;
+  }
+}
+
+function isActivitySender(event) {
+  return Boolean(activityWindow) && !activityWindow.isDestroyed() && event.sender === activityWindow.webContents &&
+    event.senderFrame === event.sender.mainFrame && isActivityPage(event.senderFrame?.url);
+}
+
+function isComputerDashboardSender(event) {
+  return Boolean(dashboardContents) && event.sender === dashboardContents && event.senderFrame === event.sender.mainFrame &&
+    is1904(event.senderFrame?.url);
+}
+
+function showActivity({ focus = true } = {}) {
+  if (activityWindow && !activityWindow.isDestroyed()) {
+    if (focus) {
+      if (activityWindow.isMinimized()) activityWindow.restore();
+      activityWindow.show();
+      activityWindow.focus();
+    } else if (!activityWindow.isVisible()) {
+      activityWindow.showInactive();
+    }
+    return activityWindow;
+  }
+  const win = new BrowserWindow({
+    title: 'Computer Activity', icon: ICON, width: 760, height: 680, minWidth: 420, minHeight: 320,
+    backgroundColor: PALETTE[activeTheme()].color, autoHideMenuBar: true, show: false,
+    webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'activity-preload.cjs') },
+  });
+  activityWindow = win;
+  win.on('closed', () => { if (activityWindow === win) activityWindow = undefined; });
+  win.webContents.on('dom-ready', () => win.webContents.send('1904:activity-theme', activeTheme()));
+  void win.loadFile(ACTIVITY_PAGE);
+  if (focus) win.show();
+  else win.showInactive();
+  return win;
+}
+
+function computerFolders() {
+  if (!computerBridge) return [];
+  const chosen = computerLink.folders.all();
+  const apps = new Map(computerBridge.apps().map(appRef => [appRef.id, appRef]));
+  for (const [id, entry] of Object.entries(chosen)) {
+    if (!apps.has(id)) apps.set(id, { id, name: entry.name || 'App', repo: entry.repo || '' });
+  }
+  return [...apps.values()].map(appRef => ({
+    appId: appRef.id, name: computerPolicy.visibleLine(appRef.name), repo: appRef.repo,
+    path: computerPolicy.visibleLine(computerBridge.describe({ app: appRef }).root), chosen: Object.hasOwn(chosen, appRef.id),
+  }));
+}
+
+function activityState(output) {
+  if (!computerBridge) {
+    return { connection: { connected: false, text: 'Use My Computer is available in 1904 Desktop for macOS and Windows.' }, runs: [], folders: [] };
+  }
+  return { ...computerBridge.snapshot({ output }), folders: computerFolders() };
+}
+
+function sendActivityState() {
+  clearTimeout(activityStateTimer);
+  activityStateTimer = undefined;
+  if (!activityStateDirty) return;
+  activityStateDirty = false;
+  if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send('1904:activity-state', activityState(false));
+}
+
+// Output goes to the window in small batches. Each batch is numbered, so the window can skip
+// what its first full snapshot already contained.
+function flushActivityOutput() {
+  clearTimeout(activityOutputTimer);
+  activityOutputTimer = undefined;
+  sendActivityState();
+  if (!activityOutput.length) return;
+  const chunks = [];
+  for (const chunk of activityOutput.splice(0)) {
+    const last = chunks[chunks.length - 1];
+    if (last?.id === chunk.id && last.stream === chunk.stream) last.text += chunk.text;
+    else chunks.push({ ...chunk });
+  }
+  activityOutputSeq++;
+  if (activityWindow && !activityWindow.isDestroyed()) activityWindow.webContents.send('1904:activity-output', { seq: activityOutputSeq, chunks });
+}
+
+function queueComputerOutput(id, stream, text) {
+  activityOutput.push({ id, stream, text });
+  activityOutputTimer ??= setTimeout(flushActivityOutput, 100);
+}
+
+function sendComputerIndicator() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('1904:chrome-computer', computerBridge?.running() ?? 0);
+}
+
+function computerChanged() {
+  sendComputerIndicator();
+  const key = JSON.stringify(computerState());
+  if (key !== computerMenuKey) {
+    computerMenuKey = key;
+    installMenu();
+  }
+  activityStateDirty = true;
+  activityStateTimer ??= setTimeout(sendActivityState, 50);
+}
+
+function focusComputerPrompt() {
+  if (mainWindow && !mainWindow.isDestroyed()) showDashboard();
+  else showActivity();
+}
+
+// The prompt is up but the person may be elsewhere: say so where they will see it.
+function computerAttention(request) {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : activityWindow;
+  if (parent && !parent.isDestroyed() && parent.isFocused()) return;
+  if (process.platform === 'win32' && parent && !parent.isDestroyed()) parent.flashFrame(true);
+  if (!Notification.isSupported()) return;
+  const sender = computerPolicy.label(request.sender.name, 60) || 'Someone';
+  const notice = new Notification({ title: `${sender} wants to run a command on this computer`, body: 'Open 1904 Desktop to review it.' });
+  computerNotices.add(notice);
+  const forget = () => computerNotices.delete(notice);
+  notice.once('click', () => { forget(); focusComputerPrompt(); });
+  notice.once('close', forget);
+  notice.once('failed', forget);
+  notice.show();
+}
+
+async function chooseComputerFolder(appRef, parent) {
+  if (!computerBridge || !appRef?.id) return false;
+  const current = computerBridge.describe({ app: appRef }).root;
+  const options = {
+    title: `Choose a folder for ${appRef.name}`, buttonLabel: 'Use This Folder',
+    defaultPath: existsSync(current) ? current : path.dirname(current),
+    properties: ['openDirectory', 'createDirectory'],
+  };
+  const { canceled, filePaths } = parent && !parent.isDestroyed() ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  const folder = filePaths?.[0];
+  if (canceled || !folder) return false;
+  const problem = computerPolicy.folderChoiceProblem(folder, { platform: computerPlatform(), home: os.homedir() });
+  if (problem) {
+    await messageBox({ type: 'warning', title: 'Use My Computer', message: 'Choose another folder', detail: problem, buttons: ['OK'] }, parent);
+    return false;
+  }
+  computerLink.folders.set(appRef.id, folder, appRef);
+  computerChanged();
+  return true;
+}
+
+function connectComputer() {
+  if (!computerBridge) return Promise.resolve(computerState());
+  computerConnecting ??= (async () => {
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+    try {
+      const platform = computerPlatform();
+      const connected = await pairComputer({
+        link: computerLink, fetch: sessionFetch, origin: ORIGIN,
+        computer: {
+          name: computerPolicy.defaultComputerName(os.hostname()), platform, appVersion: app.getVersion(),
+          shell: computerPolicy.computerShell({ platform, env: process.env, exists: existsSync }).name,
+        },
+        confirm: async name => (await messageBox(connectPrompt(name), parent)).response === 1,
+        notice: ({ message, detail }) => messageBox({ type: 'info', title: 'Use My Computer', message, detail, buttons: ['OK'] }, parent),
+      });
+      if (connected) computerBridge.start();
+    } catch (error) {
+      console.warn('1904 Desktop could not connect this computer:', error?.message);
+    } finally {
+      computerConnecting = undefined;
+      computerChanged();
+    }
+    return computerState();
+  })();
+  return computerConnecting;
+}
+
+async function disconnectComputer() {
+  if (!computerBridge || !computerLink.info()) return;
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const { response } = await messageBox({
+    type: 'question', title: 'Use My Computer', message: 'Disconnect this computer from 1904?',
+    detail: 'Tasks can no longer ask to run commands here, a command that is running now is stopped, ' +
+      'and 1904 stops accepting this computer’s key.',
+    buttons: ['Cancel', 'Disconnect'], defaultId: 0, cancelId: 0, noLink: true,
+  }, parent);
+  if (response !== 1) return;
+  const confirmed = await computerBridge.disconnect();
+  computerChanged();
+  if (!confirmed) {
+    await messageBox({
+      type: 'info', title: 'Use My Computer', message: 'This computer is disconnected',
+      detail: '1904 couldn’t be reached, so this computer may still be listed in 1904 Settings. Its key is gone from here; remove it under Computers in 1904 Settings when you can.',
+      buttons: ['OK'],
+    }, mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined);
+  }
+}
+
+function startComputer() {
+  const platform = computerPlatform();
+  if (!platform) return;
+  computerLink = createComputerLink({ dir: app.getPath('userData'), safeStorage });
+  computerBridge = createComputerBridge({
+    origin: ORIGIN, fetch: sessionFetch, link: computerLink, platform, home: os.homedir(), env: process.env,
+    exists: existsSync, fs: { mkdir, stat }, spawn, kill: (pid, signal) => process.kill(pid, signal),
+    clock: { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: timer => clearTimeout(timer) },
+    ask: createDialogAsk({
+      computerName: () => computerLink.info()?.name || computerPolicy.defaultComputerName(os.hostname()),
+      showMessageBox: (view, signal) => messageBox({
+        type: 'question', title: view.title, message: view.message, detail: view.detail, buttons: view.buttons,
+        defaultId: view.defaultId, cancelId: view.cancelId, noLink: true, signal,
+      }, computerParent()),
+      chooseFolder: appRef => chooseComputerFolder(appRef, computerParent()),
+      attention: computerAttention,
+    }),
+    onChange: computerChanged,
+    onOutput: queueComputerOutput,
+    onDisconnected: computerChanged,
+  });
+  powerMonitor.on('suspend', () => computerBridge.suspend());
+  powerMonitor.on('resume', () => computerBridge.resume());
+  computerBridge.start();
+}
+
+function installComputerHandlers() {
+  ipcMain.handle('1904:computer-state', event => isComputerDashboardSender(event) ? computerState() : null);
+  ipcMain.handle('1904:computer-connect', event => isComputerDashboardSender(event) ? connectComputer() : null);
+  ipcMain.on('1904:computer-activity', (event) => {
+    if (isComputerDashboardSender(event)) showActivity();
+  });
+  ipcMain.on('1904:show-computer-activity', (event) => {
+    if (mainWindow && event.sender === mainWindow.webContents && event.senderFrame === event.sender.mainFrame) showActivity();
+  });
+  ipcMain.handle('1904:activity-snapshot', (event) => {
+    if (!isActivitySender(event)) return null;
+    flushActivityOutput();
+    return { seq: activityOutputSeq, ...activityState(true) };
+  });
+  ipcMain.on('1904:activity-stop', (event, id) => {
+    if (isActivitySender(event) && computerPolicy.computerId(id)) computerBridge?.stopRun(id);
+  });
+  ipcMain.handle('1904:activity-folder', async (event, appId, action) => {
+    if (!isActivitySender(event) || typeof appId !== 'string') return false;
+    const folder = computerFolders().find(entry => entry.appId === appId);
+    if (!folder) return false;
+    if (action === 'reset') {
+      const reset = computerLink.folders.reset(appId);
+      computerChanged();
+      return reset;
+    }
+    if (action === 'change') return chooseComputerFolder({ id: appId, name: folder.name, repo: folder.repo }, activityWindow);
+    return false;
+  });
 }
 
 app.setName('1904 Desktop');
@@ -541,13 +877,23 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', (_event, args) => { if (!handleLink(fromArgs(args)) && desktopReady) showDashboard(); });
   app.on('activate', () => { if (desktopReady) showDashboard(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+  // Commands still running on this computer are stopped, and 1904 told, before the app goes.
+  app.on('before-quit', (event) => {
+    if (computerQuitting || !computerBridge?.busy()) return;
+    event.preventDefault();
+    computerQuitting = true;
+    void computerBridge.shutdown().finally(() => app.quit());
+  });
   void app.whenReady().then(() => {
     installPermissionRules();
-    installMenu(startUpdater(() => mainWindow, () => {
-      const restart = Menu.getApplicationMenu()?.getMenuItemById('1904-restart-update');
-      if (restart) restart.visible = true;
-    }));
+    menuUpdates = startUpdater(() => mainWindow, () => {
+      updateReady = true;
+      installMenu();
+    });
+    startComputer();
+    installMenu();
     installChromeHandlers();
+    installComputerHandlers();
     desktopReady = true;
     showDashboard();
   });
