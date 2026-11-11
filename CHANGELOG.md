@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2
+
+- When 1904 can’t be reached, the window says so and keeps trying on its own, then returns to the page you were on. No error page, and nothing to click unless you want to retry sooner.
+- The message tells you whether you’re offline, 1904 can’t be reached, or 1904 itself isn’t responding.
+- A page that crashes reloads by itself. If it crashes again straight away, you get a Reload button instead of a loop.
+- Import a repository from the **…** menu under Help.
+- The active task’s name and actions sit in the title bar.
+- Updates are published through GitHub Releases.
+
 ## 0.3.1
 
 - Find Help in the title bar’s **…** menu, with version info, release notes, documentation, support, and update controls.

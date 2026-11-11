@@ -1,9 +1,10 @@
-const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeTheme, Notification, powerMonitor, screen, session, shell } = require('electron');
+const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeTheme, net, Notification, powerMonitor, screen, session, shell } = require('electron');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
 const { startUpdater } = require('./updater.cjs');
 const { SCHEME, IMPORT_PATH, taskUrl, repositorySetupUrl, readLink, startSignIn } = require('./desktop-links.cjs');
 const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
+const { CRASH_WINDOW_MS, retryDelay, isServerFailure, retryTarget, recoveryView } = require('./desktop-recovery.cjs');
 
 const ORIGIN = 'https://1904.ai';
 const AGENTS = `${ORIGIN}/agents`;
@@ -39,6 +40,11 @@ let signInAttempt;
 let queuedLink;
 let desktopReady = false;
 let loginReturnTo = '/agents';
+// Set while the dashboard cannot be shown: { kind, url, attempts, trying, timer }.
+let recovery;
+let lastCrashAt = 0;
+// A Cloudflare challenge answers with an error status but is a page the person must see.
+let challengeUrl;
 const notices = new Map();
 const notified = new Set();
 
@@ -65,9 +71,58 @@ function openBrowser(url) {
 
 function loadPage(contents, url) {
   if (contents && !contents.isDestroyed() && is1904(url)) {
+    // Opening anything while the dashboard is down is itself the next attempt.
+    if (recovery && contents === dashboardContents) {
+      clearTimeout(recovery.timer);
+      recovery = { ...recovery, url, attempts: recovery.attempts + 1, trying: true, timer: undefined };
+      sendRecovery();
+    }
     // Chromium reports main-frame load errors through did-fail-load below.
     void contents.loadURL(url).catch(() => {});
   }
+}
+
+function fallbackUrl() {
+  return loginReturnTo === IMPORT_PATH ? ORIGIN + IMPORT_PATH : taskUrl(loginReturnTo, ORIGIN)?.href || AGENTS;
+}
+
+function sendRecovery() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('1904:chrome-recovery', recoveryView(recovery));
+}
+
+// The dashboard could not be loaded. Hide its view (an error page helps nobody), say what is
+// happening in the window itself, and keep trying behind it until a page loads.
+function startRecovery(kind, failedUrl) {
+  if (!mainWindow || mainWindow.isDestroyed() || !dashboardContents || dashboardContents.isDestroyed()) return;
+  clearTimeout(recovery?.timer);
+  const attempts = recovery?.attempts ?? 0;
+  if (!recovery) {
+    setTaskTitleBar(false);
+    dashboardTheme = undefined;
+    syncTitleBar();
+    dashboardView.setVisible(false);
+    if (mainWindow.isFocused()) mainWindow.webContents.focus();
+  }
+  recovery = {
+    kind, attempts, trying: false,
+    url: retryTarget(failedUrl, ORIGIN, fallbackUrl()),
+    // A page that crashes twice is not retried on a timer: it would crash in a loop.
+    timer: kind === 'crashed' ? undefined : setTimeout(retryNow, retryDelay(attempts)),
+  };
+  sendRecovery();
+}
+
+function retryNow() {
+  if (recovery) loadPage(dashboardContents, recovery.url);
+}
+
+function endRecovery() {
+  if (!recovery) return;
+  clearTimeout(recovery.timer);
+  recovery = undefined;
+  if (dashboardView) dashboardView.setVisible(true);
+  sendRecovery();
+  if (mainWindow?.isFocused() && dashboardContents && !dashboardContents.isDestroyed()) dashboardContents.focus();
 }
 
 function openTask(target) {
@@ -107,12 +162,14 @@ function handleLink(link) {
   if (!attempt || attempt.state !== link.state || attempt.expiresAt <= Date.now()) return false;
   signInAttempt = undefined;
   showDashboard();
+  // A pending retry must not navigate away from the sign-in exchange.
+  clearTimeout(recovery?.timer);
   const data = new URLSearchParams({ code: link.code, state: link.state, verifier: attempt.verifier, returnTo: attempt.returnTo });
   void dashboardContents.loadURL(ORIGIN + '/api/auth/desktop/exchange', {
     postData: [{ type: 'rawData', bytes: Buffer.from(data.toString()) }],
     extraHeaders: 'Content-Type: application/x-www-form-urlencoded\r\nX-1904-Desktop-Exchange: 1\r\n',
   }).catch(() => {
-    // Main-frame network failures are handled by the offline page.
+    // Main-frame network failures are handled by did-fail-load.
   });
   return true;
 }
@@ -213,6 +270,13 @@ function installPermissionRules() {
       callback({});
     }
   });
+  profile.webRequest.onHeadersReceived({ urls: [`${ORIGIN}/*`], types: ['mainFrame'] }, (details, callback) => {
+    if (details.webContentsId === dashboardContents?.id) {
+      const challenged = Object.keys(details.responseHeaders ?? {}).some(name => name.toLowerCase() === 'cf-mitigated');
+      challengeUrl = challenged ? details.url : undefined;
+    }
+    callback({});
+  });
   const ordinaryPermissions = new Set(['clipboard-sanitized-write', 'fullscreen', 'notifications']);
   profile.setPermissionCheckHandler((contents, permission, origin, details) => {
     if (!is1904(contents?.getURL()) || !is1904(origin) || !details.isMainFrame) return false;
@@ -223,25 +287,6 @@ function installPermissionRules() {
     const audioOnly = permission === 'media' && details.mediaTypes?.length === 1 && details.mediaTypes[0] === 'audio';
     callback(Boolean(trusted && (ordinaryPermissions.has(permission) || audioOnly)));
   });
-}
-
-function offlinePage() {
-  const retryUrl = loginReturnTo === IMPORT_PATH ? ORIGIN + IMPORT_PATH : taskUrl(loginReturnTo, ORIGIN)?.href || AGENTS;
-  const retry = retryUrl.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
-  const html = `<!doctype html><html lang="en"><meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
-    <meta name="viewport" content="width=device-width, initial-scale=1"><title>1904 Desktop</title>
-    <style>
-      :root { color-scheme: dark light; font: 16px system-ui; }
-      body { min-height: 100vh; margin: 0; display: grid; place-items: center; }
-      main { max-width: 27rem; padding: 2rem; }
-      header { font-size: .8rem; font-weight: 700; letter-spacing: .13em; }
-      h1 { font-size: 2rem; letter-spacing: -.04em; margin: .7rem 0; }
-      p { line-height: 1.55; margin-bottom: 1.8rem; }
-      a { color: Canvas; background: CanvasText; text-decoration: none; padding: .6rem 1rem; border-radius: .45rem; }
-    </style><main><header>1904 DESKTOP</header><h1>Couldn’t reach 1904</h1>
-    <p>Check your connection, then try again.</p><a href="${retry}">Try again</a></main></html>`;
-  return `data:text/html;base64,${Buffer.from(html).toString('base64')}`;
 }
 
 function activeTheme() {
@@ -321,8 +366,12 @@ function installChromeHandlers() {
     notice.show();
     return true;
   });
+  ipcMain.on('1904:recovery-retry', (event) => {
+    if (mainWindow && event.sender === mainWindow.webContents && event.senderFrame === event.sender.mainFrame) retryNow();
+  });
   powerMonitor.on('resume', () => {
-    if (is1904(dashboardContents?.getURL())) dashboardContents.send('1904:resume');
+    if (recovery) { if (recovery.kind !== 'crashed') retryNow(); }
+    else if (is1904(dashboardContents?.getURL())) dashboardContents.send('1904:resume');
   });
 }
 
@@ -364,30 +413,38 @@ function createWindow() {
       dashboardContents = undefined;
       dashboardTheme = undefined;
       taskTitleBar = false;
+      clearTimeout(recovery?.timer);
+      recovery = undefined;
     }
   });
-  win.webContents.on('dom-ready', syncTitleBar);
+  win.webContents.on('dom-ready', () => { syncTitleBar(); sendRecovery(); });
   void win.loadFile(path.join(__dirname, 'chrome.html'));
 
-  contents.on('did-navigate', () => setTaskTitleBar(false));
+  contents.on('did-navigate', (_event, url, httpResponseCode) => {
+    setTaskTitleBar(false);
+    if (!is1904(url)) return;
+    // Not emitted for Chromium's own error pages, so this is always a real answer from 1904.
+    if (isServerFailure(httpResponseCode) && url !== challengeUrl) startRecovery('unavailable', url);
+    else endRecovery();
+  });
   contents.on('did-navigate-in-page', () => {
     if (!isTaskTitleBarPage(contents.getURL())) setTaskTitleBar(false);
   });
   contents.on('dom-ready', () => {
     if (is1904(contents.getURL())) void contents.insertCSS(DASHBOARD_CSS).catch(() => {});
-    if (win.isFocused()) contents.focus();
+    if (!recovery && win.isFocused()) contents.focus();
   });
-  const showOffline = () => {
-    if (contents.isDestroyed()) return;
-    setTaskTitleBar(false);
-    dashboardTheme = undefined;
-    syncTitleBar();
-    void contents.loadURL(offlinePage()).catch(() => {});
-  };
   contents.on('did-fail-load', (_event, code, _description, url, isMainFrame) => {
-    if (isMainFrame && code !== -3 && is1904(url)) showOffline();
+    if (isMainFrame && code !== -3 && is1904(url)) startRecovery(net.isOnline() ? 'unreachable' : 'offline', url);
   });
-  contents.on('render-process-gone', showOffline);
+  contents.on('render-process-gone', (_event, details) => {
+    if (contents.isDestroyed() || details.reason === 'clean-exit') return;
+    const repeated = Date.now() - lastCrashAt < CRASH_WINDOW_MS;
+    lastCrashAt = Date.now();
+    // The first crash is reloaded without a word; only a page that keeps crashing is shown as broken.
+    if (repeated) startRecovery('crashed', contents.getURL());
+    else loadPage(contents, retryTarget(contents.getURL(), ORIGIN, fallbackUrl()));
+  });
   const link = queuedLink;
   queuedLink = undefined;
   if (!handleLink(link)) loadPage(contents, AGENTS);
@@ -434,7 +491,8 @@ function installMenu(updates) {
     { label: 'View', submenu: [
       { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: (_item, win) => {
         const contents = win && win !== mainWindow ? win.webContents : dashboardContents;
-        if (contents && is1904(contents.getURL())) contents.reload();
+        if (recovery && contents === dashboardContents) retryNow();
+        else if (contents && is1904(contents.getURL())) contents.reload();
         else { showDashboard(); loadPage(dashboardContents, AGENTS); }
       } },
       { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: () => dashboardContents?.setZoomLevel(0) },
