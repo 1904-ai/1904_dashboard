@@ -14,7 +14,7 @@ const { TOO_LONG, createApprovalQueue, promptFits } = require('./computer-approv
 const { AWAY_PATH, leaseCovers, readLease } = require('./computer-away.cjs');
 const { PAIR_PATH } = require('./computer-link.cjs');
 const { resolveLoginPath, startRun } = require('./computer-runner.cjs');
-const { SANDBOX_EXEC, sandboxPlan } = require('./computer-sandbox.cjs');
+const { SANDBOX_EXEC, sandboxPlan, gitConfigForRun, cleanupPlan } = require('./computer-sandbox.cjs');
 
 const POLL_PATH = '/api/desktop/computer/poll';
 const RESULT_PATH = '/api/desktop/computer/result';
@@ -103,9 +103,27 @@ function createComputerBridge({
   fs, realpathSync = value => value, spawn, kill, clock, ask, awayChoice = async () => undefined, confirmPresence = async () => false,
   confirmLease = async () => false,
   onChange = () => {}, onOutput = () => {}, onDisconnected = () => {}, onNotice = () => {},
-  run = startRun, resolvePath = resolveLoginPath,
+  run = startRun, resolvePath = resolveLoginPath, gitIdentity = async () => ({}), removeTemp,
 }) {
-  const allowance = policy.createAllowance({ now: clock.now });
+  // A sandboxed run's temp folder is deleted inside the sandbox, never by an unsandboxed recursive delete
+  // that a process the command left behind could point elsewhere with a symbolic link.
+  const removeTempDir = removeTemp ?? ((dir, { sandboxed }) => {
+    if (!dir) return;
+    if (!sandboxed) {
+      fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+      return;
+    }
+    const cleanup = cleanupPlan({ tempDir: dir });
+    if (cleanup.error) return;
+    try {
+      const child = spawn(cleanup.file, cleanup.args, { cwd: '/', env: {}, stdio: 'ignore', windowsHide: true });
+      child?.on?.('error', () => {});
+    } catch { /* left for macOS's own temp cleanup */ }
+  });
+  // Windows has no sandbox: every command there is full access, and the person's allowances cover that.
+  const allowance = policy.createAllowance({ now: clock.now, unsandboxed: platform !== 'macos' });
+  const taskAllowance = policy.createTaskAllowance({ now: clock.now, unsandboxed: platform !== 'macos' });
+  let taskTimer;
   const entries = new Map();
   const handles = new Map();
   const known = new Set();
@@ -144,13 +162,37 @@ function createComputerBridge({
     return lease && leaseCovers(lease, request, { full: isFull(request), place: describe(request) }).ok ? lease : undefined;
   }
 
-  /** What already covers a request: away mode, then "Allow for this message". Full access never is. */
+  /**
+   * What already covers a request: away mode, "Allow for this message", then "Allow for this task".
+   * On macOS full access never is; on Windows, where everything is full access, the person's own
+   * allowances cover it (away mode never does: it needs the sandbox).
+   */
   function covered(request) {
-    if (isFull(request)) return undefined;
-    const lease = coveringLease(request);
+    if (platform === 'macos' && request.access === 'full') return undefined;
+    const lease = !isFull(request) && coveringLease(request);
     if (lease) return { decision: 'away', network: request.network && lease.network };
-    if (allowance.covers(request, describe(request))) return { decision: 'covered', network: request.network };
+    const place = describe(request);
+    if (allowance.covers(request, place)) return { decision: 'covered', network: request.network };
+    // covers() already holds a request for the internet to what the person allowed.
+    if (taskAllowance.covers(request, place)) return { decision: 'task-covered', network: request.network };
     return undefined;
+  }
+
+  /** Computer Activity and the menu list the task allowances; they refresh when one runs out. */
+  function scheduleTaskEnd() {
+    clock.clearTimeout(taskTimer);
+    const next = taskAllowance.nextEnd();
+    if (!Number.isFinite(next)) return;
+    taskTimer = clock.setTimeout(() => {
+      scheduleTaskEnd();
+      onChange();
+    }, Math.min(2_000_000_000, Math.max(0, next - clock.now()) + 50));
+  }
+
+  function clearAllowances() {
+    allowance.clear();
+    taskAllowance.clear();
+    scheduleTaskEnd();
   }
 
   const approvals = createApprovalQueue({
@@ -162,7 +204,12 @@ function createComputerBridge({
         : {}),
     }),
     precheck: covered,
-    onAnswer: (request, answer) => { if (answer.choice === 'allow') allowance.allow(request, describe(request), answer.network); },
+    onAnswer: (request, answer) => {
+      if (answer.choice === 'allow') allowance.allow(request, describe(request), answer.network);
+      if (answer.choice === 'task' && taskAllowance.allow(request, describe(request), { minutes: answer.minutes, network: answer.network })) {
+        scheduleTaskEnd();
+      }
+    },
     onChange: () => onChange(),
   });
 
@@ -269,7 +316,8 @@ function createComputerBridge({
     const timer = clock.setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
     try {
       const response = await fetch(origin + POLL_PATH, {
-        method: 'GET', credentials: 'include', cache: 'no-store', signal: controller.signal,
+        // The token never follows a redirect anywhere.
+        method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'error', signal: controller.signal,
         headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
       });
       if (response.status === 401) throw Object.assign(new Error('1904 no longer accepts this computer.'), { revoked: true });
@@ -300,7 +348,7 @@ function createComputerBridge({
     const timer = clock.setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(origin + pathname, {
-        method, credentials: 'include', cache: 'no-store', signal: controller.signal,
+        method, credentials: 'include', cache: 'no-store', redirect: 'error', signal: controller.signal,
         headers: { authorization: `Bearer ${token}`, accept: 'application/json', ...(payload ? { 'content-type': 'application/json' } : {}) },
         ...(payload ? { body: JSON.stringify(payload) } : {}),
       });
@@ -388,13 +436,18 @@ function createComputerBridge({
     const limits = policy.COMPUTER_AWAY_MAX_COMMANDS;
     const maxCommands = Number.isSafeInteger(choice.maxCommands) ? Math.min(limits.max, Math.max(limits.min, choice.maxCommands)) : limits.default;
     if (!minutes) return { ok: false };
-    // true: Touch ID confirmed. false: refused. undefined: this Mac has no Touch ID.
-    const presence = await confirmPresence(`start away mode for “${policy.label(taskTitle, 80) || 'this task'}”`);
-    if (presence === false) return { ok: false };
     const asked = { taskId, appId, taskTitle, network: choice.network === true, maxCommands };
     const answer = await call(AWAY_PATH, { action: 'start', taskId, appId, minutes, network: asked.network, maxCommands });
     const lease = answer.ok ? readLease(answer.body, asked) : undefined;
     if (!lease) return { ok: false, message: policy.label(answer.body?.error, 300) || 'Away mode could not be started. Check your connection and try again.' };
+    // Touch ID names the task by 1904's own title for the lease it started, never a title the page passed
+    // in. true: confirmed. false: refused. undefined: this Mac has no Touch ID, so the last look below.
+    let presence = false;
+    try { presence = await confirmPresence(`start away mode for “${policy.label(lease.taskTitle, 80) || 'this task'}”`); } catch { presence = false; }
+    if (presence === false) {
+      track(call(AWAY_PATH, { action: 'end', leaseId: lease.id }));
+      return { ok: false };
+    }
     if (presence !== true) {
       // Without Touch ID, one last look at what 1904 started (its own task title), defaulting to Cancel.
       // Nothing runs under the lease until this is answered: it is kept here only afterwards.
@@ -476,6 +529,15 @@ function createComputerBridge({
       const plan = policy.commandPlan({ shell: policy.computerShell({ platform, env, exists }), command: request.command, sandbox });
       if (plan.error) return await fail(plan.error);
       const commandEnv = policy.commandEnvironment({ platform, env, searchPath: await commandSearchPath(), tempDir, shellFile: plan.shellFile });
+      if (!full) {
+        // The sandbox cannot read ~/.gitconfig (it often holds tokens): git gets a config with only the person's
+        // name and email, written into this run's temp folder.
+        let gitEnv = { GIT_CONFIG_GLOBAL: '/dev/null' };
+        try {
+          gitEnv = (await gitConfigForRun({ tempDir, ...(await gitIdentity().catch(() => ({}))), writeFile: fs.writeFile })).env;
+        } catch { /* git runs with no global settings */ }
+        Object.assign(commandEnv, gitEnv);
+      }
 
       const confirmation = await confirmRunning(request, place.path);
       if (confirmation === 'withdrawn') {
@@ -506,14 +568,14 @@ function createComputerBridge({
       close(entry, outcome.status, { exitCode: outcome.exitCode, message: outcome.message, durationMs: outcome.durationMs });
       await report(policy.finalUpdate({ requestId: request.id, ...outcome, cwd: place.path }), { retry: active });
     } finally {
-      fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      removeTempDir(tempDir, { sandboxed: !full });
     }
   }
 
   /** Whether this computer may answer the request at all: its own message, or its own away mode. */
   function originAllows(request) {
     if (request.origin?.kind === 'desktop') {
-      return messages.has(request.messageId, request.task.id) ? { ok: true } : { ok: false, message: policy.NOT_FROM_DESKTOP };
+      return messages.has(request.messageId, request.task.id, request.app.id) ? { ok: true } : { ok: false, message: policy.NOT_FROM_DESKTOP };
     }
     if (request.origin?.kind === 'away') {
       return leaseCovers(leases.get(request.origin.leaseId), request, { full: isFull(request), place: describe(request) });
@@ -554,7 +616,7 @@ function createComputerBridge({
         entry.approval = 'away';
         onNotice({ kind: 'away-run', request, lease: current });
         await execute(request, entry, request.network && current.network);
-      } else if (decision === 'once' || decision === 'allow' || decision === 'covered') {
+      } else if (['once', 'allow', 'task', 'covered', 'task-covered'].includes(decision)) {
         entry.approval = decision;
         await execute(request, entry, answer.network === true);
       } else if (decision === 'decline') {
@@ -674,7 +736,7 @@ function createComputerBridge({
 
   /** Forgets everything tied to this pairing: the token, allowances, away mode, the list of sent messages. */
   function forgetPairing() {
-    allowance.clear();
+    clearAllowances();
     leases.endAll();
     scheduleAwayEnd();
     messages.clear();
@@ -748,6 +810,8 @@ function createComputerBridge({
       if (paused) {
         halt('paused');
         approvals.cancelAll('paused');
+        // Pause takes back every allowance: after Resume, commands ask again.
+        clearAllowances();
       } else {
         this.start();
       }
@@ -804,6 +868,26 @@ function createComputerBridge({
     away() {
       return leases.list().map(lease => ({ ...lease, taskTitle: policy.visibleLine(lease.taskTitle), commandsLeft: lease.maxCommands - lease.used }));
     },
+    /** "Allow for this task" allowances in force, spelled out for display. */
+    taskAllowances() {
+      return taskAllowance.list().map(entry => ({
+        taskId: entry.taskId, taskTitle: policy.visibleLine(entry.taskTitle), appName: policy.visibleLine(entry.appName),
+        until: entry.until, network: entry.network, full: entry.full,
+      }));
+    },
+    endTaskAllowance(taskId) {
+      const ended = taskAllowance.end(taskId);
+      scheduleTaskEnd();
+      if (ended) onChange();
+      return ended;
+    },
+    /**
+     * This window just sent a message on a task: an "Allow for this message" for an earlier message on
+     * that task ends here, whatever message ids 1904 sends later.
+     */
+    messageSent(messageId, taskId) {
+      allowance.seen({ messageId, task: { id: taskId } });
+    },
     /**
      * What Computer Activity shows, with every text 1904 or the agent wrote spelled out the way the
      * prompt shows it. Output (and older commands' output from the log) only when asked for, on the
@@ -818,6 +902,7 @@ function createComputerBridge({
       return {
         connection: connection(),
         away: this.away(),
+        allowances: this.taskAllowances(),
         runs: live.map(entry => ({
           ...visibleRun(entry), asking: entry.id === asking,
           ...(output ? { output: entry.output.map(segment => ({ ...segment })), outputCut: entry.outputCut } : {}),

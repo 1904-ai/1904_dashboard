@@ -1,18 +1,19 @@
-// Use My Computer: asking the person. One native prompt at a time, in the order requests arrive.
-// A request that is cancelled or runs out of time leaves the queue, and its prompt closes, without
-// an answer. The dialog itself is passed in, so the queue and the wording are tested with plain Node.
+// Use My Computer: asking the person. One prompt at a time, in the order requests arrive. A request
+// that is cancelled or runs out of time leaves the queue, and its prompt closes, without an answer.
+// The prompt window itself is passed in (main.cjs, approval.html), so the queue, the wording and the
+// answers are tested with plain Node.
 
-const { unusualCharacters, visibleLine, visibleText } = require('./computer-policy.cjs');
+const { TASK_ALLOWANCE_MINUTES, unusualCharacters, visibleLine, visibleText } = require('./computer-policy.cjs');
 
 /** The most a prompt shows. A longer command is never asked about, so a prompt always shows all of what runs. */
 const PROMPT_COMMAND_MAX = 3000;
 const PROMPT_COMMAND_LINES = 60;
-/** Every line of the command starts with this, so no line of it can pass for one of the prompt's own. */
-const COMMAND_LINE_MARK = '│ ';
 const TOO_LONG = '1904 Desktop did not ask: this command is too long to review in one prompt. Put it in a script file and run that, or split it.';
 const FULL_ACCESS = 'This command runs without the sandbox, with access to all your files and keys.';
 const NO_SANDBOX_HERE = '1904 Desktop has no sandbox on Windows yet, so every command here runs this way.';
 const SANDBOXED = 'It runs in a sandbox: it can change files only in the app’s folder and can’t read your keys, your personal folders or 1904 Desktop’s data.';
+/** "Allow for this task" starts at this many minutes unless the person picks another length. */
+const TASK_ALLOWANCE_DEFAULT = 60;
 
 /** Whether the whole command, as the prompt shows it, fits in one prompt. */
 function promptFits(command) {
@@ -20,129 +21,134 @@ function promptFits(command) {
   return shown.length <= PROMPT_COMMAND_MAX && shown.split('\n').length <= PROMPT_COMMAND_LINES;
 }
 
+function minutesText(minutes) {
+  return minutes < 60 ? `${minutes} minutes` : minutes === 60 ? '1 hour' : `${minutes / 60} hours`;
+}
+
 /**
- * The prompt for one request. `place` is where it would start (placeFor). The default and cancel
- * button is Decline. `full`: the command runs without the sandbox (it asked for full access, or the
- * computer has no sandbox); it can then only be run once, with a second confirmation. A request that
- * starts outside the app's folder shows the full path and can only be run once. `away`: away mode
- * can be offered. A sandboxed request that asks for the internet gets a checkbox, off by default.
+ * What the prompt shows for one request. `place` is where it would start (placeFor). `full`: the
+ * command runs without the sandbox (it asked for full access, or this computer has no sandbox).
+ * `away`: away mode can be offered. Every text from 1904 or the agent is spelled out (visibleText),
+ * and the prompt lists the characters outside plain ASCII wherever they appear.
+ *
+ * What a "Run" can cover (`scopes`): only this command; the rest of this message; or everything this
+ * task asks from messages sent from this computer, for a length the person picks. A command that
+ * starts outside the app's folder, or that asks a Mac for full access, can only be run once.
  * Throws for a command that does not fit (promptFits): those are never asked about.
  */
 function approvalView({ request, computerName, place, full = false, platform, away = false }) {
   if (!promptFits(request.command)) throw new Error(TOO_LONG);
-  const command = visibleText(request.command).split('\n').map(line => COMMAND_LINE_MARK + line);
-  const unusual = [
-    ...(unusualCharacters(request.command).length ? [`In the command: ${unusualCharacters(request.command).join(', ')}`] : []),
-    ...(unusualCharacters(place.path).length ? [`In the folder: ${unusualCharacters(place.path).join(', ')}`] : []),
+  const unsandboxed = platform !== 'macos';
+  const fields = [
+    ['Task', request.task.title], ['App', request.app.name], ['Asked by', request.sender.name],
   ];
+  const unusual = [
+    ['the command', request.command], ['the folder', place.path], ...fields.map(([name, text]) => [`the ${name.toLowerCase()}`, text]),
+    ['the agent’s reason', request.reason],
+  ].flatMap(([where, text]) => {
+    const found = unusualCharacters(text);
+    return found.length ? [`In ${where}: ${found.join(', ')}`] : [];
+  });
   const network = !full && request.network === true;
-  const detail = [
-    `Task: ${visibleLine(request.task.title)}`,
-    `App: ${visibleLine(request.app.name)}`,
-    `Asked by: ${visibleLine(request.sender.name)}`,
-    '',
-    'Command:',
-    ...command,
-    '',
-    ...(place.outside ? [
-      'This command starts outside the app’s folder, in:',
-      visibleLine(place.path),
-      `The app’s folder is ${visibleLine(place.root)}.`,
-    ] : [`Folder: ${visibleLine(place.path)}`]),
-    ...(unusual.length ? ['', 'Check these characters. They are not plain ASCII, and some look like other letters:', ...unusual] : []),
-    '',
-    `The agent says: “${visibleLine(request.reason) || 'No reason given.'}”`,
-    '',
-    ...(full
-      ? [FULL_ACCESS, ...(platform === 'windows' ? [NO_SANDBOX_HERE] : []), 'An approved command runs as you, with your permissions on this computer.']
-      : [SANDBOXED, network ? 'The agent asks for internet access for this command. Tick the box below to allow it.' : 'It has no internet access.']),
-  ].join('\n');
-  const choices = ['decline', 'once'];
-  if (!full && !place.outside) choices.push('allow');
-  choices.push('folder');
-  if (away && !full && !place.outside) choices.push('away');
-  const names = {
-    decline: 'Decline', once: full ? 'Run with full access…' : 'Run once', allow: 'Allow for this message',
-    folder: 'Choose folder…', away: 'Allow while I’m away…',
-  };
+  const covers = !place.outside && (!full || unsandboxed);
+  const scopes = [
+    { id: 'once', label: 'Only this command' },
+    ...(covers ? [
+      { id: 'message', label: 'The rest of this message', hint: 'Later commands from the same message, in the same folder, run without asking. It ends when you send this task another message, or after 30 minutes.' },
+      {
+        id: 'task', label: 'Everything this task asks, for',
+        hint: full
+          ? 'Commands from messages you send this task from this computer run without asking, with full access, until the time is up. End it any time from the 1904 menu or Computer Activity.'
+          : 'Sandboxed commands from messages you send this task from this computer run without asking until the time is up. Full access still asks. End it any time from the 1904 menu or Computer Activity.',
+      },
+    ] : []),
+  ];
   return {
     title: 'Use My Computer',
-    message: `Run a command on ${visibleLine(computerName)}?`,
-    detail,
-    buttons: choices.map(choice => names[choice]),
-    choices,
-    defaultId: 0,
-    cancelId: 0,
-    full,
+    heading: `Run a command on ${visibleLine(computerName)}?`,
+    fields: fields.map(([name, text]) => ({ name, text: visibleLine(text) })),
+    command: visibleText(request.command),
+    folder: place.outside
+      ? { path: visibleLine(place.path), outside: true, root: visibleLine(place.root) }
+      : { path: visibleLine(place.path), outside: false },
+    reason: visibleLine(request.reason) || '',
+    unusual,
+    access: full ? 'full' : 'sandbox',
+    notes: full
+      ? [FULL_ACCESS, ...(unsandboxed ? [NO_SANDBOX_HERE] : [])]
+      : [SANDBOXED, network ? 'The agent asks for internet access for this command.' : 'It has no internet access.'],
     network,
-    ...(network ? { checkboxLabel: 'Allow internet access for this command', checkboxChecked: false } : {}),
+    scopes,
+    minutes: TASK_ALLOWANCE_MINUTES.map(value => ({ value, label: minutesText(value) })),
+    defaultMinutes: TASK_ALLOWANCE_DEFAULT,
+    away: away && !full && !place.outside,
+    run: full ? 'Run with full access' : 'Run',
   };
 }
 
-/** The second question before full access, where there is no Touch ID. Cancel is the default. */
-function fullAccessConfirmation(request) {
-  return {
-    type: 'warning', title: 'Use My Computer',
-    message: 'Run this command with full access?',
-    detail: `${FULL_ACCESS} It can read and change anything you can, use your keys and reach the network.\n\n` +
-      visibleText(request.command).split('\n').map(line => COMMAND_LINE_MARK + line).join('\n'),
-    buttons: ['Cancel', 'Run with full access'], defaultId: 0, cancelId: 0, noLink: true,
-  };
-}
+const SCOPE_CHOICE = { once: 'once', message: 'allow', task: 'task' };
 
 /**
- * The prompt loop for one request, built on the platform dialog.
- * - `showMessageBox(view, signal)` resolves with `{ response, checkboxChecked }`.
- * - `chooseFolder(app)` lets the person pick that app's folder; the prompt is then shown again.
- * - `confirmFull(request)` is the second confirmation for full access (Touch ID or a second dialog).
+ * The prompt loop for one request, built on the prompt window.
+ * - `showPrompt(view, signal)` resolves the person's answer: `{ action: 'run' | 'decline' | 'folder' | 'away',
+ *   scope, minutes, network }`. Anything else counts as Decline.
+ * - `closePrompt()` closes the window once this request is answered or gone.
+ * - `chooseFolder(app)` lets the person pick that app's folder; the prompt then shows the new folder.
+ * - `confirmFull(request)` confirms full access where the computer can (Touch ID); true elsewhere.
  * - `startAway(request)` (from the options) starts away mode for the request's task; true when it did.
- * Resolves `{ choice, network }`: choice 'once', 'allow', 'away' or 'decline'; network when the person
- * ticked internet access.
+ * Resolves `{ choice, network, minutes }`: choice 'once', 'allow', 'task', 'away' or 'decline'; network
+ * when the person allowed internet access; minutes for 'task'.
  */
-function createDialogAsk({ showMessageBox, chooseFolder, computerName, attention = () => {}, confirmFull = async () => false }) {
+function createPromptAsk({ showPrompt, closePrompt = () => {}, chooseFolder, computerName, attention = () => {}, confirmFull = async () => true }) {
   return async function ask(request, { signal, describe, full = false, platform, startAway }) {
     const decline = { choice: 'decline', network: false };
     if (!promptFits(request.command)) return decline;
     attention(request);
-    for (;;) {
-      if (signal?.aborted) return decline;
-      const view = approvalView({ request, computerName: computerName(), place: describe(request), full, platform, away: typeof startAway === 'function' });
-      const { response, checkboxChecked } = await showMessageBox(view, signal);
-      if (signal?.aborted) return decline;
-      const choice = view.choices[response] ?? 'decline';
-      if (choice === 'folder') {
-        try { await chooseFolder(request.app); } catch { /* the prompt comes back either way */ }
-        continue;
-      }
-      if (choice === 'away') {
-        let started = false;
-        try { started = await startAway(request); } catch { /* the prompt comes back */ }
+    try {
+      for (;;) {
         if (signal?.aborted) return decline;
-        if (started) return { choice: 'away', network: false };
-        continue;
+        const view = approvalView({ request, computerName: computerName(), place: describe(request), full, platform, away: typeof startAway === 'function' });
+        const answer = await showPrompt(view, signal);
+        if (signal?.aborted) return decline;
+        if (answer?.action === 'folder') {
+          try { await chooseFolder(request.app); } catch { /* the prompt shows again either way */ }
+          continue;
+        }
+        if (answer?.action === 'away' && view.away) {
+          let started = false;
+          try { started = await startAway(request); } catch { /* the prompt shows again */ }
+          if (signal?.aborted) return decline;
+          if (started) return { choice: 'away', network: false };
+          continue;
+        }
+        if (answer?.action !== 'run') return decline;
+        const scope = view.scopes.some(entry => entry.id === answer.scope) ? answer.scope : 'once';
+        if (full) {
+          let confirmed = false;
+          try { confirmed = await confirmFull(request); } catch { confirmed = false; }
+          if (signal?.aborted || !confirmed) return decline;
+        }
+        const minutes = view.minutes.some(entry => entry.value === answer.minutes) ? answer.minutes : view.defaultMinutes;
+        return { choice: SCOPE_CHOICE[scope], network: view.network && answer.network === true, ...(scope === 'task' ? { minutes } : {}) };
       }
-      if (choice === 'once' && full) {
-        let confirmed = false;
-        try { confirmed = await confirmFull(request); } catch { confirmed = false; }
-        if (signal?.aborted || !confirmed) return decline;
-      }
-      return { choice, network: view.network && checkboxChecked === true };
+    } finally {
+      try { closePrompt(); } catch { /* already closed */ }
     }
   };
 }
 
-const ANSWERS = ['once', 'allow', 'away', 'decline'];
+const ANSWERS = ['once', 'allow', 'task', 'away', 'decline'];
 
 /**
  * The queue of requests waiting for the person.
- * - `ask(request, { signal })` shows one prompt and resolves `{ choice, network }`.
+ * - `ask(request, { signal })` shows one prompt and resolves `{ choice, network, minutes }`.
  * - `onAnswer(request, answer)` runs as soon as the person answers, before any other request is
- *   looked at, so "Allow for this message" or away mode is in place for the requests behind it.
- * - `precheck(request)` returns a decision (`{ decision: 'covered' | 'away', network }`) when an
- *   earlier answer already covers the request; it then skips its prompt, wherever it is in the queue.
- * `enqueue` resolves with `{ decision, network }`: decision 'once', 'allow', 'away', 'decline',
- * 'covered', 'expired', or the reason passed to `cancel`. Only one prompt is ever open: the next
- * waits until the open one has really closed.
+ *   looked at, so an allowance or away mode is in place for the requests behind it.
+ * - `precheck(request)` returns a decision (`{ decision: 'covered' | 'task-covered' | 'away', network }`)
+ *   when an earlier answer already covers the request; it then skips its prompt, wherever it is in the queue.
+ * `enqueue` resolves with `{ decision, network }`: decision 'once', 'allow', 'task', 'away', 'decline',
+ * 'covered', 'task-covered', 'expired', or the reason passed to `cancel`. Only one prompt is ever open:
+ * the next waits until the open one has really closed.
  */
 function createApprovalQueue({ ask, precheck = () => undefined, onAnswer = () => {}, clock, onChange = () => {} }) {
   const waiting = [];
@@ -171,8 +177,10 @@ function createApprovalQueue({ ask, precheck = () => undefined, onAnswer = () =>
     onChange();
     Promise.resolve()
       .then(() => ask(item.request, { signal: item.controller.signal }))
-      .then(answer => ANSWERS.includes(answer?.choice) ? { choice: answer.choice, network: answer.network === true } : { choice: 'decline', network: false },
-        () => ({ choice: 'decline', network: false }))
+      .then(answer => ANSWERS.includes(answer?.choice)
+        ? { choice: answer.choice, network: answer.network === true, ...(answer.choice === 'task' ? { minutes: answer.minutes } : {}) }
+        : { choice: 'decline', network: false },
+      () => ({ choice: 'decline', network: false }))
       .then(answer => {
         if (!item.settled) {
           try { onAnswer(item.request, answer); } catch { /* the answer still stands */ }
@@ -215,6 +223,6 @@ function createApprovalQueue({ ask, precheck = () => undefined, onAnswer = () =>
 }
 
 module.exports = {
-  PROMPT_COMMAND_MAX, PROMPT_COMMAND_LINES, COMMAND_LINE_MARK, TOO_LONG, FULL_ACCESS,
-  promptFits, approvalView, fullAccessConfirmation, createDialogAsk, createApprovalQueue,
+  PROMPT_COMMAND_MAX, PROMPT_COMMAND_LINES, TOO_LONG, FULL_ACCESS, NO_SANDBOX_HERE, TASK_ALLOWANCE_DEFAULT,
+  promptFits, approvalView, createPromptAsk, createApprovalQueue,
 };

@@ -25,7 +25,28 @@ if (!windows && !mac) throw new Error('Use a native Windows x64, Intel Mac, or A
 
 const publish = { provider: 'github', owner: '1904-ai', repo: '1904_dashboard' };
 
-const config = { ...build, forceCodeSigning: true, publish };
+// Electron Builder flips these in each build right before signing it (on a universal Mac build, after
+// merging both architectures); scripts/verify-release.cjs reads them back from the signed app.
+// - No ELECTRON_RUN_AS_NODE, NODE_OPTIONS or --inspect: nothing can start the signed app as Node.js or
+//   attach a debugger to the main process, which holds this computer's Use My Computer keys.
+//   (startup-guard.cjs refuses Chromium's debugging switches, which have no fuse.)
+// - Code only from the signed app.asar, checked against the hash embedded in the signed executable.
+// - Cookies encrypted with the system key store, like the keys. One-way: a build without this fuse
+//   cannot read cookies written with it, so its users would have to sign in again.
+// - file:// keeps Electron's extra privileges for now: without them, loadFile cannot read the title bar
+//   and other local pages from inside app.asar (ERR_FILE_NOT_FOUND). Turn it off once those pages are
+//   served from a custom protocol instead; the release launch check fails if the title bar cannot load.
+const electronFuses = {
+  runAsNode: false,
+  enableNodeOptionsEnvironmentVariable: false,
+  enableNodeCliInspectArguments: false,
+  enableEmbeddedAsarIntegrityValidation: true,
+  onlyLoadAppFromAsar: true,
+  enableCookieEncryption: true,
+  grantFileProtocolExtraPrivileges: true,
+};
+
+const config = { ...build, forceCodeSigning: true, publish, electronFuses };
 if (windows) {
   config.win = {
     ...build.win,

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
+  <title>Use My Computer</title>
+  <style>
+    :root { color-scheme: dark; --canvas: #121416; --panel: #181b1e; --raised: #1f2327; --text: #e2e7ec; --muted: #9aa5b0; --line: #ffffff18;
+      --hover: #ffffff14; --edge: #ffffff38; --code: #0b0d0f; --warn: #d9a441; --warn-bg: #d9a4411a; --bad: #e5706b; --bad-bg: #e5706b1f;
+      --ok: #5cc489; --primary: #e2e7ec; --on-primary: #121416; --danger: #d9534f; --on-danger: #ffffff; --focus: #7aa7ff; }
+    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --panel: #ffffff; --raised: #ffffff; --text: #20262d; --muted: #59636e; --line: #00000016;
+      --hover: #0000000c; --edge: #00000030; --code: #eef1f4; --warn: #8a5d00; --warn-bg: #f5c34d26; --bad: #b42318; --bad-bg: #b423180f;
+      --ok: #1f7a46; --primary: #20262d; --on-primary: #ffffff; --danger: #c0372f; --on-danger: #ffffff; --focus: #2f6fe0; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; display: flex; flex-direction: column; background: var(--canvas); color: var(--text); font: 400 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    /* Every text that came from 1904 or the agent keeps its own direction, so it cannot reorder the prompt around it. */
+    .them { direction: ltr; unicode-bidi: isolate; overflow-wrap: anywhere; }
+    .bar { flex: none; height: 40px; display: flex; align-items: center; gap: 9px; padding: 0 16px; -webkit-app-region: drag; user-select: none;
+      border-bottom: 1px solid var(--line); }
+    :root[data-platform="macos"] .bar { padding-left: 84px; }
+    .bar img { width: 20px; height: 20px; border-radius: 5px; }
+    .bar span { font-weight: 650; font-size: 12px; letter-spacing: .01em; }
+    main { flex: 1 1 auto; overflow: auto; padding: 16px 20px 8px; }
+    h1 { margin: 0 0 12px; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0 0 14px; }
+    dt { color: var(--muted); }
+    dd { margin: 0; font-weight: 550; min-width: 0; }
+    .label { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+    .chip { font-size: 10.5px; font-weight: 650; letter-spacing: .02em; text-transform: none; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
+    .chip[data-access="sandbox"] { color: var(--ok); }
+    .chip[data-access="full"] { color: var(--bad); }
+    pre { margin: 0; max-height: 260px; overflow: auto; padding: 10px 12px; border-radius: 8px; background: var(--code); border: 1px solid var(--line);
+      font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; tab-size: 4; }
+    pre .line { display: block; direction: ltr; unicode-bidi: isolate; overflow-wrap: anywhere; min-height: 1.5em; }
+    .hint { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+    .hint[hidden], [hidden] { display: none !important; }
+    .folder { margin: 12px 0 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+    .folder code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); }
+    .outside { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--bad); background: var(--bad-bg); }
+    .outside code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .reason { margin: 12px 0 0; padding-left: 10px; border-left: 2px solid var(--edge); color: var(--text); }
+    .reason::before { content: "The agent says"; display: block; font-size: 11px; color: var(--muted); }
+    .unusual { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--warn); background: var(--warn-bg); }
+    .unusual strong { display: block; margin-bottom: 4px; }
+    .unusual ul, .notes { margin: 0; padding-left: 18px; }
+    .notes { margin: 12px 0 0; color: var(--muted); }
+    .notes[data-access="full"] { color: var(--bad); }
+    .network { display: flex; gap: 8px; align-items: center; margin: 12px 0 0; }
+    fieldset { margin: 14px 0 4px; padding: 0; border: 0; }
+    legend { padding: 0; margin: 0 0 6px; font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+    .scope { display: grid; grid-template-columns: auto 1fr; gap: 0 9px; align-items: start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--panel); cursor: pointer; }
+    .scope + .scope { margin-top: 6px; }
+    .scope:has(input:checked) { border-color: var(--edge); background: var(--raised); }
+    .scope input { margin: 2px 0 0; }
+    .scope-title { font-weight: 550; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .scope-hint { grid-column: 2; color: var(--muted); font-size: 12px; }
+    select { font: inherit; color: inherit; background: var(--canvas); border: 1px solid var(--edge); border-radius: 6px; padding: 1px 6px; }
+    footer { flex: none; display: flex; align-items: center; gap: 10px; padding: 12px 20px 14px; border-top: 1px solid var(--line); background: var(--canvas); }
+    .links { display: flex; gap: 4px; margin-right: auto; flex-wrap: wrap; }
+    button { font: 600 13px system-ui, -apple-system, "Segoe UI", sans-serif; color: inherit; background: transparent; border: 1px solid var(--edge);
+      border-radius: 7px; padding: 6px 14px; cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--hover); }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    button.link { border-color: transparent; color: var(--muted); padding: 6px 8px; font-weight: 550; }
+    button.link:hover { color: var(--text); }
+    button.primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); min-width: 96px; }
+    button.primary:hover:not(:disabled) { background: var(--primary); filter: brightness(1.12); }
+    button.primary[data-access="full"] { background: var(--danger); border-color: var(--danger); color: var(--on-danger); }
+    button:disabled { opacity: .45; cursor: default; }
+    @media (forced-colors: active) { pre, .scope, .outside, .unusual { border: 1px solid CanvasText; } }
+  </style>
+</head>
+<body>
+  <div class="bar"><img id="logo" alt=""><span>Use My Computer</span></div>
+  <main>
+    <h1 id="heading" class="them"></h1>
+    <dl id="fields"></dl>
+    <section aria-labelledby="command-label">
+      <p class="label" id="command-label">Command <span class="chip" id="access"></span></p>
+      <pre id="command" tabindex="0" aria-labelledby="command-label"></pre>
+      <p class="hint" id="scroll-hint" hidden>Scroll to the end of the command to run it.</p>
+    </section>
+    <p class="folder" id="folder" hidden><span>Folder</span> <code class="them" id="folder-path"></code></p>
+    <div class="outside" id="outside" hidden>
+      <strong>This command starts outside the app’s folder, in:</strong><br><code class="them" id="outside-path"></code><br>
+      <span>The app’s folder is </span><code class="them" id="outside-root"></code>
+    </div>
+    <p class="reason them" id="reason" hidden></p>
+    <div class="unusual" id="unusual" hidden>
+      <strong>Check these characters. They are not plain ASCII, and some look like other letters:</strong>
+      <ul id="unusual-list"></ul>
+    </div>
+    <ul class="notes" id="notes"></ul>
+    <label class="network" id="network-row" hidden><input type="checkbox" id="network"> Allow internet access for this command</label>
+    <fieldset id="scopes"><legend>When you run it, also allow</legend></fieldset>
+  </main>
+  <footer>
+    <div class="links">
+      <button type="button" class="link" id="choose-folder">Choose folder…</button>
+      <button type="button" class="link" id="away" hidden>Allow while I’m away…</button>
+    </div>
+    <button type="button" id="decline">Decline</button>
+    <button type="button" class="primary" id="run" disabled>Run</button>
+  </footer>
+</body>
+</html>

@@ -15,7 +15,7 @@
     h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
     .header-row { display: flex; align-items: center; gap: 12px; }
     .header-row button { margin-left: auto; }
-    #pause[hidden], #away-section[hidden], #history-section[hidden] { display: none; }
+    #pause[hidden], #away-section[hidden], #allowances-section[hidden], #history-section[hidden] { display: none; }
     .away { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border: 1px solid var(--wait); border-radius: 8px; background: var(--panel); padding: 8px 12px; }
     .away-title { font-weight: 600; }
     .away-detail { flex: 1 1 240px; color: var(--muted); }
@@ -74,6 +74,10 @@
     <section aria-labelledby="away-title" id="away-section" hidden>
       <h2 id="away-title">Away mode</h2>
       <ul id="away"></ul>
+    </section>
+    <section aria-labelledby="allowances-title" id="allowances-section" hidden>
+      <h2 id="allowances-title">Running without asking</h2>
+      <ul id="allowances"></ul>
     </section>
     <section aria-labelledby="runs-title">
       <h2 id="runs-title">Commands</h2>

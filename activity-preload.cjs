@@ -52,6 +52,8 @@ function approvalLine(run) {
   if (run.approval === 'allow') return 'You allowed it for this message.';
   if (run.approval === 'covered') return 'Allowed for this message, so it ran without asking again.';
   if (run.approval === 'away') return 'Ran in away mode, without asking.';
+  if (run.approval === 'task') return 'You allowed it, and this task’s later commands for the time you picked.';
+  if (run.approval === 'task-covered') return 'Allowed for this task, so it ran without asking.';
   return '';
 }
 
@@ -204,6 +206,30 @@ function renderAway(leases) {
   }));
 }
 
+let allowancesShown;
+
+// "Allow for this task": each one with its end time and a button that ends it now.
+function renderAllowances(allowances) {
+  const key = JSON.stringify(allowances);
+  if (key === allowancesShown) return;
+  allowancesShown = key;
+  document.getElementById('allowances-section').hidden = allowances.length === 0;
+  document.getElementById('allowances').replaceChildren(...allowances.map(entry => {
+    const item = node('li', 'away');
+    const until = new Date(entry.until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const end = node('button', '', 'Stop allowing');
+    end.type = 'button';
+    end.addEventListener('click', () => {
+      end.disabled = true;
+      ipcRenderer.send('1904:activity-end-allowance', entry.taskId);
+    });
+    const how = entry.full ? 'full access' : entry.network ? 'sandboxed, with internet' : 'sandboxed, no internet';
+    item.append(node('span', 'away-title', entry.taskTitle),
+      node('span', 'away-detail', `${entry.appName} · until ${until} · ${how}`), end);
+    return item;
+  }));
+}
+
 let historyShown;
 // Older output arrives once, with the window's first full snapshot; later updates list the commands only.
 const historyOutput = new Map();
@@ -241,6 +267,7 @@ function render(state) {
   pause.title = state.connection?.paused ? 'Take requests from 1904 again' : 'Stop taking requests from 1904 until you resume';
   pause.dataset.paused = state.connection?.paused ? 'true' : 'false';
   renderAway(state.away || []);
+  renderAllowances(state.allowances || []);
   renderRuns(state.runs || []);
   renderHistory(state.history);
   renderFolders(state.folders || []);

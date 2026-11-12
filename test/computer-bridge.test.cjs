@@ -186,6 +186,8 @@ function setup({
   const made = [];
   const temps = [];
   const removed = [];
+  const removedHow = [];
+  const written = [];
   const killed = [];
   const prompts = [];
   const disconnected = [];
@@ -207,7 +209,10 @@ function setup({
       mkdtemp: async prefix => { const dir = `${prefix}${temps.length + 1}`; temps.push(dir); return dir; },
       realpath: async value => value,
       rm: async value => { removed.push(value); },
+      writeFile: async (file, text) => { written.push({ file, text }); },
     },
+    removeTemp: (dir, { sandboxed }) => { if (dir) { removed.push(dir); removedHow.push(sandboxed ? 'sandboxed' : 'plain'); } },
+    gitIdentity: async () => ({ name: 'Dana', email: 'dana@example.com' }),
     resolvePath: async () => '/opt/homebrew/bin:/usr/bin:/bin',
     spawn: shell.spawn,
     kill: (pid, signal) => {
@@ -217,7 +222,7 @@ function setup({
     clock,
     ask: (request, options) => new Promise(resolve => {
       const prompt = { request, options, place: options.describe(request), open: true };
-      prompt.answer = (choice, network = false) => { prompt.open = false; resolve({ choice, network }); };
+      prompt.answer = (choice, network = false, minutes) => { prompt.open = false; resolve({ choice, network, ...(minutes ? { minutes } : {}) }); };
       prompts.push(prompt);
       options.signal.addEventListener('abort', () => { prompt.open = false; prompt.aborted = true; resolve({ choice: 'decline' }); });
     }),
@@ -230,7 +235,7 @@ function setup({
   const openPrompts = () => prompts.filter(prompt => prompt.open);
   const run = id => bridge.snapshot({ output: true }).runs.find(entry => entry.id === id);
   return {
-    clock, server, link, messages, leases, logged, shell, folders, made, temps, removed, killed, prompts, openPrompts,
+    clock, server, link, messages, leases, logged, shell, folders, made, temps, removed, removedHow, written, killed, prompts, openPrompts,
     disconnected, notices, choices, presence, leaseQuestions, bridge, run,
   };
 }
@@ -282,7 +287,8 @@ test('an approved command runs in the app folder and its output and exit code go
   assert.equal(child.options.windowsHide, true);
   assert.deepEqual(child.options.env, {
     PATH: '/opt/homebrew/bin:/usr/bin:/bin', HOME: '/Users/dana', USER: 'dana', SHELL: '/bin/zsh', TERM: 'dumb', TMPDIR: '/private/tmp/1904-run-1',
-  }, 'nothing else from 1904 Desktop’s environment, never its tokens');
+    GIT_CONFIG_GLOBAL: '/private/tmp/1904-run-1/gitconfig',
+  }, 'nothing else from 1904 Desktop’s environment, never its tokens; git gets its own minimal config');
   assert.deepEqual(t.server.results, [{ requestId: ask.id, status: 'running', cwd: '/Users/dana/1904/shop' }]);
   assert.equal(t.bridge.running(), 1);
 
@@ -1036,7 +1042,10 @@ test('away mode never starts without the person, and the cloud cannot start one'
   noTouch.bridge.start();
   await flush();
   assert.equal((await noTouch.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'Fix' })).ok, false);
-  assert.deepEqual(noTouch.server.away, [], 'Touch ID refused: 1904 is never asked');
+  await flush();
+  assert.deepEqual(noTouch.presence, ['start away mode for “Fix the login page”'], 'Touch ID names 1904’s own title for the lease, not the page’s');
+  assert.deepEqual(noTouch.server.away.map(call => call.action), ['start', 'end'], 'Touch ID refused: the lease 1904 started is ended at once');
+  assert.deepEqual(noTouch.bridge.away(), [], 'and never kept here');
   const cancelled = setup({ awayChoice: async () => undefined });
   cancelled.bridge.start();
   await flush();
@@ -1132,7 +1141,7 @@ test('away mode ends at its time, from Desktop, and when 1904 says it ended else
   assert.ok(t.notices.some(notice => notice.kind === 'away-ended' && notice.reason === 'elsewhere'));
 });
 
-test('Windows has no sandbox yet: every command is full access, with no allowance and no away mode', async () => {
+test('Windows has no sandbox yet: every command is full access, the person’s allowances cover it, and there is no away mode', async () => {
   const t = setup({ platform: 'windows', home: 'C:\\Users\\dana', env: { SystemRoot: 'C:\\Windows', Path: 'C:\\Windows\\system32', GITHUB_TOKEN: 'never' } });
   t.bridge.start();
   await flush();
@@ -1149,10 +1158,131 @@ test('Windows has no sandbox yet: every command is full access, with no allowanc
   assert.deepEqual([child.options.env.TEMP, child.options.env.TMP], ['\\private\\tmp\\1904-run-1', '\\private\\tmp\\1904-run-1'], 'its own temp folder');
   child.finish(0);
   await flush();
+  const again = request({ access: 'full', network: true });
+  t.server.deliver({ requests: [again] });
+  await flush();
+  assert.equal(t.openPrompts().length, 0, 'the same message runs without asking: the person allowed it');
+  assert.equal(t.run(again.id).approval, 'covered');
+  t.shell.children[1].finish(0);
+  await flush();
+  // Another message on the task ends that allowance; "Allow for this task" then covers the task's later messages.
+  t.server.deliver({ requests: [request({ messageId: 'msg_000000002' })] });
+  await flush();
+  assert.equal(t.openPrompts().length, 1);
+  t.openPrompts()[0].answer('task', false, 60);
+  await flush();
+  t.shell.children[2].finish(0);
+  await flush();
+  const later = request({ messageId: 'msg_000000003', access: 'full' });
+  t.server.deliver({ requests: [later] });
+  await flush();
+  assert.equal(t.openPrompts().length, 0, 'covered by "Allow for this task", full access included on Windows');
+  assert.equal(t.run(later.id).approval, 'task-covered');
+  assert.equal(t.bridge.taskAllowances()[0].full, true);
+  assert.match((await t.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'x' })).message, /only on macOS/);
+});
+
+test('"Allow for this task" covers the task’s later messages sent from here, in its folder, until its time is up', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  t.server.deliver({ requests: [request({ network: true })] });
+  await flush();
+  t.prompts[0].answer('task', true, 30);
+  await flush();
+  t.shell.children[0].finish(0);
+  await flush();
+  assert.deepEqual(t.bridge.taskAllowances().map(entry => [entry.taskTitle, entry.network, entry.full]), [['Fix the login page', true, false]]);
+  const next = request({ messageId: 'msg_000000004', network: true });
+  t.server.deliver({ requests: [next] });
+  await flush();
+  assert.equal(t.openPrompts().length, 0, 'another message from this computer: covered');
+  assert.equal(t.run(next.id).approval, 'task-covered');
+  t.shell.children[1].finish(0);
+  await flush();
+  // Never for full access on a Mac, another app, a folder outside the app's, or a message sent elsewhere.
+  const full = request({ messageId: 'msg_000000005', access: 'full' });
+  const otherApp = request({ messageId: 'msg_000000005', app: { id: 'app_2', name: 'Blog', repo: 'blog' } });
+  const outsideFolder = request({ messageId: 'msg_000000005', cwd: '/etc' });
+  for (const asked of [full, otherApp, outsideFolder]) {
+    t.server.deliver({ requests: [asked] });
+    await flush();
+    assert.equal(t.openPrompts().at(-1)?.request.id, asked.id, `${asked.id} asks`);
+    t.openPrompts().at(-1).answer('decline');
+    await flush();
+  }
+  // Ending it from Computer Activity or the menu: the next command asks again.
+  assert.equal(t.bridge.endTaskAllowance('task_1'), true);
+  t.server.deliver({ requests: [request({ messageId: 'msg_000000006' })] });
+  await flush();
+  assert.equal(t.openPrompts().length, 1);
+  t.openPrompts()[0].answer('task', false, 30);
+  await flush();
+  t.shell.children.at(-1).finish(0);
+  await flush();
+  await t.clock.advance(30 * 60_000 + 100);
+  await flush();
+  assert.deepEqual(t.bridge.taskAllowances(), [], 'its time is up');
+  t.server.deliver({ requests: [request({ messageId: 'msg_000000007' })] });
+  await flush();
+  assert.equal(t.openPrompts().length, 1, 'asks again after the time is up');
+});
+
+test('a sandboxed run gets a git config with only the person’s name and email, and its temp folder is removed inside the sandbox', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
   t.server.deliver({ requests: [request()] });
   await flush();
-  assert.equal(t.openPrompts().length, 1, 'the same message asks again');
-  assert.match((await t.bridge.startAway({ taskId: 'task_1', appId: 'app_1', taskTitle: 'x' })).message, /only on macOS/);
+  t.prompts[0].answer('once');
+  await flush();
+  const child = t.shell.children[0];
+  assert.equal(child.options.env.GIT_CONFIG_GLOBAL, '/private/tmp/1904-run-1/gitconfig');
+  assert.equal(t.written[0].file, '/private/tmp/1904-run-1/gitconfig');
+  assert.match(t.written[0].text, /name = "Dana"/);
+  assert.match(t.written[0].text, /email = "dana@example\.com"/);
+  child.finish(0);
+  await flush();
+  assert.deepEqual(t.removedHow, ['sandboxed']);
+  // Full access reads the person's own git settings like any command they type, and its folder is removed plainly.
+  t.server.deliver({ requests: [request({ access: 'full' })] });
+  await flush();
+  t.openPrompts()[0].answer('once');
+  await flush();
+  assert.equal(t.shell.children[1].options.env.GIT_CONFIG_GLOBAL, undefined);
+  t.shell.children[1].finish(0);
+  await flush();
+  assert.deepEqual(t.removedHow, ['sandboxed', 'plain']);
+  assert.equal(t.written.length, 1);
+});
+
+test('Pause takes back every allowance, and a message sent from here ends "Allow for this message"', async () => {
+  const t = setup();
+  t.bridge.start();
+  await flush();
+  t.server.deliver({ requests: [request()] });
+  await flush();
+  t.prompts[0].answer('allow');
+  await flush();
+  t.shell.children[0].finish(0);
+  await flush();
+  // The window sent a newer message on the task: whatever 1904 says later, the old allowance is over.
+  t.bridge.messageSent('msg_000000002', 'task_1');
+  t.server.deliver({ requests: [request()] });
+  await flush();
+  assert.equal(t.openPrompts().length, 1, 'the earlier message’s allowance ended when this computer sent another');
+  t.openPrompts()[0].answer('task', false, 60);
+  await flush();
+  t.shell.children.at(-1).finish(0);
+  await flush();
+  assert.equal(t.bridge.taskAllowances().length, 1);
+  t.bridge.setPaused(true);
+  assert.deepEqual(t.bridge.taskAllowances(), [], 'Pause ends it');
+  t.bridge.setPaused(false);
+  await flush();
+  t.server.deliver({ requests: [request({ messageId: 'msg_000000003' })] });
+  await flush();
+  assert.equal(t.openPrompts().length, 1, 'after Resume, commands ask again');
 });
 
 test('Pause stops polling and closes prompts until the person resumes', async () => {
