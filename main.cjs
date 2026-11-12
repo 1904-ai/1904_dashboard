@@ -551,8 +551,10 @@ function createWindow() {
     if (isServerFailure(httpResponseCode) && url !== challengeUrl) startRecovery('unavailable', url);
     else endRecovery();
   });
-  contents.on('did-navigate-in-page', () => {
+  contents.on('did-navigate-in-page', (_event, _url, isMainFrame) => {
     if (!isTaskTitleBarPage(contents.getURL())) setTaskTitleBar(false);
+    // Back on the Agents page without a reload (Settings closed over it): the page's own request stands again.
+    else if (isMainFrame) contents.send('1904:task-title-bar-replay');
   });
   contents.on('dom-ready', () => {
     if (is1904(contents.getURL())) void contents.insertCSS(DASHBOARD_CSS).catch(() => {});
