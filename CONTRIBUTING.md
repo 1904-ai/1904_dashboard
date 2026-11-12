@@ -4,7 +4,7 @@ We welcome bug reports, documentation fixes, and changes to the desktop app. Rea
 
 ## Report a bug or propose a change
 
-Search [existing issues](https://github.com/1904-ai/1904/issues) before opening a new one. For a bug, include your app version, operating system, and steps to reproduce it. If you can reproduce it in a regular browser at [1904 Agents](https://1904.ai/agents), mention that in the report. Use the [security policy](SECURITY.md) for vulnerabilities.
+Search [existing issues](https://github.com/1904-ai/1904_dashboard/issues) before opening a new one. For a bug, include your app version, operating system, and steps to reproduce it. If you can reproduce it in a regular browser at [1904 Agents](https://1904.ai/agents), mention that in the report. Use the [security policy](SECURITY.md) for vulnerabilities.
 
 For a change that affects sign-in, notifications, updates, or packaging, open an issue first so maintainers can discuss how to test it across platforms.
 

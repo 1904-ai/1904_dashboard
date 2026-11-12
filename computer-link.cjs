@@ -57,6 +57,7 @@ function createComputerLink({ dir, safeStorage, now = Date.now, folderProblem = 
     if (!value || !computerId(value.id) || typeof value.token !== 'string' || !value.token) return undefined;
     return {
       id: value.id, name: label(value.name, COMPUTER_NAME_MAX) || 'This computer', token: value.token,
+      account: label(value.account, 254) || undefined,
       proofKey: typeof value.proofKey === 'string' ? value.proofKey : undefined,
       seenAt: Number.isFinite(value.seenAt) ? value.seenAt : undefined,
     };
@@ -130,7 +131,9 @@ function createComputerLink({ dir, safeStorage, now = Date.now, folderProblem = 
     /** The id and name, without touching the key store. Undefined when this computer is not connected. */
     info() {
       const value = stored();
-      return value ? { id: value.id, name: value.name } : undefined;
+      if (!value) return undefined;
+      const account = label(value.account, 254);
+      return { id: value.id, name: value.name, ...(account ? { account } : {}) };
     },
     /** The token, decrypted on first use and then kept in memory. Undefined when there is none or it cannot be read. */
     async token() {
@@ -144,9 +147,10 @@ function createComputerLink({ dir, safeStorage, now = Date.now, folderProblem = 
       if (!proofKey) proofKey = await secret('proofKey');
       return proofKeyBytes(proofKey) ? { computerId: value.id, proofKey } : undefined;
     },
-    async save({ id, name, token: plain, proofKey: key }) {
+    async save({ id, name, token: plain, proofKey: key, account }) {
       if (!(await encryptionAvailable())) throw new Error('Secure storage is not available.');
-      writeJson(linkFile, { id, name, token: await encrypt(plain), proofKey: await encrypt(key), seenAt: now() });
+      const email = label(account, 254);
+      writeJson(linkFile, { id, name, ...(email ? { account: email } : {}), token: await encrypt(plain), proofKey: await encrypt(key), seenAt: now() });
       token = plain;
       proofKey = key;
     },
@@ -186,11 +190,25 @@ function createComputerLink({ dir, safeStorage, now = Date.now, folderProblem = 
 }
 
 /** The native prompt before connecting. Cancel is both the default and the Escape answer; Connect is 1. */
-function connectPrompt(name) {
+/** The 1904 account a pairing belongs to, from 1904's answer: `{ email, name }`, or undefined from an older 1904. */
+function readPerson(value) {
+  const email = label(value?.email, 254);
+  return email ? { email, name: label(value?.name, 120) || '' } : undefined;
+}
+
+/**
+ * The one question before this computer is kept: it names the 1904 account 1904 just paired it with,
+ * so a window that was quietly signed in to someone else's account cannot connect this computer to it.
+ */
+function connectPrompt(name, person) {
   return {
     type: 'question', title: 'Use My Computer',
     message: `Connect this computer to 1904 as ${label(name, COMPUTER_NAME_MAX) || 'My computer'}?`,
-    detail: 'When a task’s agent asks to run a command on this computer, 1904 Desktop shows you the command, ' +
+    detail: (person
+      ? `1904 account: ${person.email}${person.name ? ` (${person.name})` : ''}. Only this account’s tasks can ask to use this computer. ` +
+        'If this is not your account, choose Cancel, then sign out of 1904 Desktop and sign in again.\n\n'
+      : '') +
+      'When a task’s agent asks to run a command on this computer, 1904 Desktop shows you the command, ' +
       'the folder and the agent’s reason first. Nothing runs unless you approve it here or start away mode, and only for ' +
       'messages you send from 1904 Desktop. Commands run in a sandbox where this computer has one; a command that needs ' +
       'full access runs as you, with your permissions, and always asks you here. You can pause or disconnect this computer ' +
@@ -231,7 +249,7 @@ async function pairComputer({ link, fetch, origin, computer, confirm, notice }) 
     return false;
   }
   const name = label(computer.name, COMPUTER_NAME_MAX) || 'My computer';
-  if (!(await confirm(name))) return false;
+  // 1904 pairs first, so the question below can name the account; Cancel takes the pairing back at once.
   let response;
   try {
     response = await fetch(origin + PAIR_PATH, {
@@ -269,8 +287,19 @@ async function pairComputer({ link, fetch, origin, computer, confirm, notice }) 
     await notice(PAIR_NOTICES.failed);
     return false;
   }
+  const person = readPerson(body.person);
+  let confirmed = false;
+  try { confirmed = await confirm(name, person); } catch { confirmed = false; }
+  if (!confirmed) {
+    // Not kept here, so 1904 forgets it too. If this does not reach 1904, the token is still gone from here.
+    await fetch(origin + PAIR_PATH, {
+      method: 'DELETE', credentials: 'include', cache: 'no-store', redirect: 'error',
+      headers: { authorization: `Bearer ${body.token}`, accept: 'application/json' },
+    }).catch(() => undefined);
+    return false;
+  }
   try {
-    await link.save({ id, name: label(body.name, COMPUTER_NAME_MAX) || name, token: body.token, proofKey: body.proofKey });
+    await link.save({ id, name: label(body.name, COMPUTER_NAME_MAX) || name, token: body.token, proofKey: body.proofKey, account: person?.email });
   } catch {
     await notice(PAIR_NOTICES.unavailable);
     return false;

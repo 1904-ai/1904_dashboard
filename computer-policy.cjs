@@ -516,44 +516,102 @@ function defaultComputerName(hostname) {
   return name || 'My computer';
 }
 
-// ── "Allow for this message" ───────────────────────────────────────────────
+// ── "Allow for this message" and "Allow for this task" ─────────────────────
 
 /** "Allow for this message" never lasts longer than this, however long the message's turn runs. */
 const ALLOWANCE_MS = 30 * 60_000;
+/** How long "Allow for this task" can last, chosen in the prompt. */
+const TASK_ALLOWANCE_MINUTES = COMPUTER_AWAY_MINUTES;
 
 /**
  * Remembers, in memory only, which messages the person allowed. An allowance covers a later
  * request only when it belongs to the same message, task and app, and starts in the same folder.
- * It ends after 30 minutes, or as soon as a request for the same task arrives from another
- * message: nothing outlives the message's turn.
+ * It ends after 30 minutes, as soon as this computer sends another message on the same task, or
+ * when a request for the same task arrives from another message: nothing outlives the message's turn.
+ * `unsandboxed`: this computer has no sandbox (Windows), so every command is full access and the
+ * person's allowance covers that; on macOS a command that asks for full access is never covered.
  */
-function createAllowance({ now = Date.now, max = 100, ttlMs = ALLOWANCE_MS } = {}) {
+function createAllowance({ now = Date.now, max = 100, ttlMs = ALLOWANCE_MS, unsandboxed = false } = {}) {
   const entries = new Map();
+  const fullBlocked = request => !unsandboxed && request.access === 'full';
   function prune() {
     for (const [key, entry] of entries) if (now() - entry.at > ttlMs) entries.delete(key);
     while (entries.size > max) entries.delete(entries.keys().next().value);
   }
   return {
-    /** Every arriving request passes through here: a new message on a task ends that task's allowance. */
+    /** A new message on a task (sent from here, or named by a request) ends that task's allowance. */
     seen(request) {
       for (const [messageId, entry] of entries) {
         if (entry.taskId === request?.task?.id && messageId !== request.messageId) entries.delete(messageId);
       }
     },
-    /** `network`: whether the person also allowed internet access. Full access is never allowed this way. */
+    /** `network`: whether the person also allowed internet access. */
     allow(request, place, network = false) {
-      if (!request || !place || place.outside || request.access === 'full') return false;
+      if (!request || !place || place.outside || fullBlocked(request)) return false;
       entries.delete(request.messageId);
       entries.set(request.messageId, { taskId: request.task.id, appId: request.app.id, root: place.root, network: network === true, at: now() });
       prune();
       return true;
     },
-    /** Covered, and with internet only when it was allowed too. */
+    /** Covered, and with internet only when it was allowed too (no question where there is no sandbox). */
     covers(request, place) {
       prune();
-      const entry = request && place && !place.outside && request.access !== 'full' && entries.get(request.messageId);
+      const entry = request && place && !place.outside && !fullBlocked(request) && entries.get(request.messageId);
       return Boolean(entry && entry.taskId === request.task.id && entry.appId === request.app.id && entry.root === place.root &&
-        (!request.network || entry.network));
+        (unsandboxed || !request.network || entry.network));
+    },
+    clear() { entries.clear(); },
+    get size() { return entries.size; },
+  };
+}
+
+/**
+ * "Allow for this task": chosen in a prompt on this computer, never by 1904. For the time the person
+ * picked, the task's later commands run without asking when they come from a message sent from this
+ * computer, for the same app, starting inside the same folder. Away mode covers messages sent
+ * elsewhere; this never does. Memory only: quitting 1904 Desktop, Pause and Disconnect end it.
+ * `unsandboxed` as for createAllowance: on Windows it covers every command, which runs as the person.
+ */
+function createTaskAllowance({ now = Date.now, max = 20, unsandboxed = false } = {}) {
+  const entries = new Map();
+  const fullBlocked = request => !unsandboxed && request.access === 'full';
+  function prune() {
+    for (const [taskId, entry] of entries) if (now() >= entry.until) entries.delete(taskId);
+    while (entries.size > max) entries.delete(entries.keys().next().value);
+  }
+  return {
+    /** `minutes`: one of TASK_ALLOWANCE_MINUTES. Returns the allowance, or undefined when it cannot cover this request. */
+    allow(request, place, { minutes, network = false } = {}) {
+      if (!request || !place || place.outside || fullBlocked(request) || request.origin?.kind !== 'desktop') return undefined;
+      if (!TASK_ALLOWANCE_MINUTES.includes(minutes)) return undefined;
+      const at = now();
+      const entry = {
+        taskId: request.task.id, appId: request.app.id, root: place.root, network: network === true,
+        taskTitle: label(request.task.title, 200) || 'Task', appName: label(request.app.name, 120) || 'App',
+        startedAt: at, until: at + minutes * 60_000, full: unsandboxed,
+      };
+      entries.delete(entry.taskId);
+      entries.set(entry.taskId, entry);
+      prune();
+      return { ...entry };
+    },
+    covers(request, place) {
+      prune();
+      const entry = request && place && !place.outside && !fullBlocked(request) && request.origin?.kind === 'desktop' && entries.get(request.task.id);
+      return Boolean(entry && entry.appId === request.app.id && entry.root === place.root &&
+        (unsandboxed || !request.network || entry.network));
+    },
+    end(taskId) { return entries.delete(taskId); },
+    list() {
+      prune();
+      return [...entries.values()].map(entry => ({ ...entry }));
+    },
+    /** When the next allowance runs out, or undefined. */
+    nextEnd() {
+      prune();
+      let next;
+      for (const entry of entries.values()) if (next === undefined || entry.until < next) next = entry.until;
+      return next;
     },
     clear() { entries.clear(); },
     get size() { return entries.size; },
@@ -591,5 +649,5 @@ module.exports = {
   findOnPath, computerShell, powershellLiteral, powershellScript, encodePowerShell, decodePowerShell, commandPlan,
   STARTUP_FREE, FALLBACK_SHELL, DEFAULT_PATH, cleanSearchPath, commandEnvironment,
   createTail, createClixmlDecoder, visibleText, visibleLine, shortLine, unusualCharacters, defaultComputerName,
-  ALLOWANCE_MS, createAllowance, runningUpdate, finalUpdate,
+  ALLOWANCE_MS, TASK_ALLOWANCE_MINUTES, createAllowance, createTaskAllowance, runningUpdate, finalUpdate,
 };

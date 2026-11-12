@@ -49,20 +49,24 @@ test('the connect prompt defaults to Cancel', () => {
   assert.deepEqual([prompt.defaultId, prompt.cancelId], [0, 0], 'Return and Escape both cancel');
   assert.match(prompt.detail, /runs as you, with your permissions/);
   assert.match(prompt.detail, /only for messages you send from 1904 Desktop/);
+  assert.doesNotMatch(prompt.detail, /1904 account/, 'an older 1904 names no account');
+  const named = connectPrompt('Studio Mac', { email: 'dana@example.com', name: 'Dana' });
+  assert.match(named.detail, /^1904 account: dana@example\.com \(Dana\)\. Only this account’s tasks can ask to use this computer\. If this is not your account, choose Cancel/);
 });
 
-test('connecting asks first, then pairs with the dashboard session and keeps the token and proof key encrypted', async t => {
+test('connecting pairs with the dashboard session, names the account, and keeps the token and proof key encrypted', async t => {
   const dir = dataFolder(t);
   const link = createComputerLink({ dir, safeStorage: fakeSafeStorage() });
-  const { fetch, calls } = fakeFetch(200, { id: 'cmp_00000001', token: TOKEN, name: 'Studio Mac', proofKey: PROOF_KEY });
+  const person = { email: 'dana@example.com', name: 'Dana' };
+  const { fetch, calls } = fakeFetch(200, { id: 'cmp_00000001', token: TOKEN, name: 'Studio Mac', proofKey: PROOF_KEY, person });
   const asked = [];
   const connected = await pairComputer({
     link, fetch, origin: ORIGIN, computer,
-    confirm: async name => { asked.push(name); return true; },
+    confirm: async (name, who) => { asked.push([name, who]); return true; },
     notice: async () => assert.fail('no notice when it works'),
   });
   assert.equal(connected, true);
-  assert.deepEqual(asked, ['Studio Mac']);
+  assert.deepEqual(asked, [['Studio Mac', person]]);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, ORIGIN + PAIR_PATH);
   assert.equal(calls[0].init.method, 'POST');
@@ -73,7 +77,7 @@ test('connecting asks first, then pairs with the dashboard session and keeps the
   const onDisk = readFileSync(join(dir, LINK_FILE), 'utf8');
   assert.doesNotMatch(onDisk, new RegExp(TOKEN), 'the token is never written in clear');
   assert.doesNotMatch(onDisk, new RegExp(PROOF_KEY), 'nor the proof key');
-  assert.deepEqual(link.info(), { id: 'cmp_00000001', name: 'Studio Mac' });
+  assert.deepEqual(link.info(), { id: 'cmp_00000001', name: 'Studio Mac', account: 'dana@example.com' });
   const reopened = createComputerLink({ dir, safeStorage: fakeSafeStorage() });
   assert.equal(await reopened.token(), TOKEN, 'it survives a restart');
   assert.deepEqual(await reopened.proof(), { computerId: 'cmp_00000001', proofKey: PROOF_KEY });
@@ -106,9 +110,12 @@ test('without the system’s secure storage the computer is not connected at all
 test('cancel, signed out, too many computers and a bad answer leave nothing behind', async t => {
   const dir = dataFolder(t);
   const link = createComputerLink({ dir, safeStorage: fakeSafeStorage() });
-  const cancelled = fakeFetch(200, {});
+  const cancelled = fakeFetch(200, { id: 'cmp_00000001', token: TOKEN, name: 'Studio Mac', proofKey: PROOF_KEY, person: { email: 'eve@example.com' } });
   assert.equal(await pairComputer({ link, fetch: cancelled.fetch, origin: ORIGIN, computer, confirm: async () => false, notice: async () => {} }), false);
-  assert.equal(cancelled.calls.length, 0, 'cancelling sends nothing');
+  assert.deepEqual(cancelled.calls.map(call => call.init.method), ['POST', 'DELETE'], 'Cancel takes the pairing back from 1904 at once');
+  assert.equal(cancelled.calls[1].init.headers.authorization, `Bearer ${TOKEN}`);
+  assert.equal(cancelled.calls[1].init.redirect, 'error');
+  assert.equal(link.info(), undefined, 'and keeps nothing here');
   for (const [status, body, pattern] of [
     [401, {}, /Sign in to 1904 first/],
     [409, { error: 'You can connect up to 5 computers.' }, /up to 5 computers/],

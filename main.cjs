@@ -1,7 +1,11 @@
-const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeTheme, net, Notification, powerMonitor, safeStorage, screen, session, shell, systemPreferences } = require('electron');
-const { spawn } = require('node:child_process');
+const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerMonitor, safeStorage, screen, session, shell, systemPreferences } = require('electron');
+const { guardStartup, startSmokeReport } = require('./startup-guard.cjs');
+// A packaged build started with a debugging switch exits here, before Chromium or Node.js can act on it.
+guardStartup(app);
+const { execFile, spawn } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 const { existsSync, readFileSync, realpathSync } = require('node:fs');
-const { mkdir, mkdtemp, realpath, rm, stat } = require('node:fs/promises');
+const { mkdir, mkdtemp, realpath, rm, stat, writeFile } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { fileURLToPath } = require('node:url');
@@ -13,7 +17,7 @@ const { installContextMenu } = require('./context-menu.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
 const { createComputerBridge } = require('./computer-bridge.cjs');
-const { createDialogAsk, fullAccessConfirmation } = require('./computer-approval.cjs');
+const { createPromptAsk } = require('./computer-approval.cjs');
 const computerProof = require('./computer-proof.cjs');
 const { awayBudgetPrompt, awayConfirmPrompt, awayDurationPrompt, createAwayLeases } = require('./computer-away.cjs');
 const { createActivityLog } = require('./computer-log.cjs');
@@ -29,6 +33,13 @@ const PALETTE = {
 };
 const DASHBOARD_CSS = readFileSync(path.join(__dirname, 'dashboard.css'), 'utf8');
 const ACTIVITY_PAGE = path.join(__dirname, 'activity.html');
+const APPROVAL_PAGE = path.join(__dirname, 'approval.html');
+// The prompt takes no Run until it has been in front this long, and opens only after a pause in the
+// person's typing and clicking in the dashboard (or after the longest wait), so no key press or click
+// meant for something else can answer it.
+const APPROVAL_ARM_MS = 900;
+const APPROVAL_QUIET_MS = 1500;
+const APPROVAL_QUIET_MAX_MS = 15_000;
 const SOCIAL_AUTH = new Set([
   'https://accounts.google.com/o/oauth2/v2/auth',
   'https://github.com/login/oauth/authorize',
@@ -69,6 +80,11 @@ let computerConnecting;
 let computerQuitting = false;
 let computerMenuKey;
 let activityWindow;
+// The prompt window, and the request it is asking about: { nonce, resolve, shownAt, focusedAt }.
+let approvalWindow;
+let approvalPending;
+let approvalIconUrl;
+let approvalLoaded;
 let activityStateTimer;
 let activityStateDirty = false;
 let activityOutputTimer;
@@ -299,9 +315,10 @@ function installNavigationRules(contents) {
 function fromDashboard(details) {
   const frame = details.frame;
   const main = dashboardContents?.mainFrame;
-  // Without a frame it cannot be shown to come from the dashboard's main frame: no.
+  // Without a frame it cannot be shown to come from the dashboard's main frame: no. Only the agents
+  // dashboard sends task messages, so no other 1904 page can get one stamped.
   return Boolean(dashboardContents) && !dashboardContents.isDestroyed() && details.webContentsId === dashboardContents.id &&
-    is1904(dashboardContents.getURL()) && details.initiatorOrigin === ORIGIN &&
+    isTaskTitleBarPage(dashboardContents.getURL()) && details.initiatorOrigin === ORIGIN &&
     Boolean(frame && main && frame.processId === main.processId && frame.routingId === main.routingId);
 }
 
@@ -311,8 +328,10 @@ async function stampMessage(profile, details) {
   if (!computerLink?.info() || !computerProof.stampableRequest({ method: details.method, url: details.url, origin: ORIGIN }) || !fromDashboard(details)) return;
   try {
     const body = await computerProof.uploadBody(details.uploadData, id => profile.getBlobData(id));
-    const message = body && computerProof.messageInBody(body);
-    if (!message) return;
+    const inBody = body && computerProof.messageInBody(body);
+    const appId = computerProof.messageAppId(details.url);
+    if (!inBody || !appId) return;
+    const message = { ...inBody, appId };
     // A message the page sent with no key press or click just before is not the person's: it leaves unstamped.
     const decision = computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && dashboardContents.isFocused() });
     if (!decision.stamp) {
@@ -353,7 +372,9 @@ function installPermissionRules() {
     pendingProofs.delete(details.id);
     if (proof && fromDashboard(details)) {
       requestHeaders[computerPolicy.COMPUTER_PROOF_HEADER] = proof.header;
-      computerMessages?.record(proof.message.messageId, proof.message.taskId);
+      computerMessages?.record(proof.message.messageId, proof.message.taskId, proof.message.appId);
+      // A new message from here ends "Allow for this message" for the task's earlier messages.
+      computerBridge?.messageSent(proof.message.messageId, proof.message.taskId);
     }
     callback({ requestHeaders });
   });
@@ -386,6 +407,11 @@ function syncTitleBar() {
   if (activityWindow && !activityWindow.isDestroyed()) {
     activityWindow.setBackgroundColor(palette.color);
     activityWindow.webContents.send('1904:activity-theme', theme);
+  }
+  if (approvalWindow && !approvalWindow.isDestroyed()) {
+    approvalWindow.setBackgroundColor(palette.color);
+    if (process.platform !== 'darwin') approvalWindow.setTitleBarOverlay({ ...palette, height: 40 });
+    approvalWindow.webContents.send('1904:approval-theme', theme);
   }
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.setBackgroundColor(palette.color);
@@ -492,6 +518,10 @@ function createWindow() {
   // Real input reaches these from the operating system; events a page dispatches itself never do.
   contents.on('before-input-event', (_event, input) => computerInput.key(input));
   contents.on('input-event', (_event, input) => computerInput.pointer(input));
+  // A click that loaded a new page does not count as input on that page.
+  contents.on('did-start-navigation', (details, _url, isInPlace, isMainFrame) => {
+    if ((details?.isMainFrame ?? isMainFrame) && !(details?.isSameDocument ?? isInPlace)) computerInput.reset();
+  });
   view.setBackgroundColor(palette.color);
   win.contentView.addChildView(view);
   win.on('resize', sizeDashboard);
@@ -581,10 +611,14 @@ function computerMenu() {
     info
       ? { label: 'Use My Computer', submenu: [
         { label: `Connected as ${menuText(info.name)}`, enabled: false },
+        ...(info.account ? [{ label: `1904 account: ${menuText(info.account)}`, enabled: false }] : []),
         { type: 'separator' },
         { label: paused ? 'Resume Use My Computer' : 'Pause Use My Computer', click: () => setComputerPaused(!paused) },
         ...computerBridge.away().map(lease => ({
           label: `End Away Mode for ${menuText(computerPolicy.label(lease.taskTitle, 40))}`, click: () => computerBridge.endAway(lease.id),
+        })),
+        ...computerBridge.taskAllowances().map(entry => ({
+          label: `Stop Allowing ${menuText(computerPolicy.label(entry.taskTitle, 40))}`, click: () => computerBridge.endTaskAllowance(entry.taskId),
         })),
         { type: 'separator' },
         { label: 'Disconnect This Computer…', click: () => { void disconnectComputer(); } },
@@ -664,6 +698,25 @@ function computerFolderProblem(folder) {
   });
 }
 
+// The person's git name and email, read once outside the sandbox (which cannot read ~/.gitconfig), for the
+// minimal git config each sandboxed run gets. Never /usr/bin/git: without the developer tools it opens an
+// install dialog. cwd '/' keeps any repository's own settings out of it.
+let gitIdentityRead;
+function gitIdentity() {
+  if (process.platform !== 'darwin') return Promise.resolve({});
+  gitIdentityRead ??= (async () => {
+    const git = ['/opt/homebrew/bin/git', '/usr/local/bin/git', '/Library/Developer/CommandLineTools/usr/bin/git',
+      '/Applications/Xcode.app/Contents/Developer/usr/bin/git'].find(file => existsSync(file));
+    if (!git) return {};
+    const get = key => new Promise(resolve => execFile(git, ['config', '--global', '--get', key],
+      { cwd: '/', env: { HOME: os.homedir(), PATH: '/usr/bin:/bin' }, timeout: 5000 },
+      (error, stdout) => resolve(error ? '' : String(stdout).trim())));
+    const [name, email, lfs] = await Promise.all([get('user.name'), get('user.email'), get('filter.lfs.process')]);
+    return { name, email, lfs: Boolean(lfs) };
+  })();
+  return gitIdentityRead;
+}
+
 function setComputerPaused(paused) {
   computerBridge?.setPaused(paused);
   computerChanged();
@@ -680,11 +733,10 @@ async function confirmWithTouchId(reason) {
   }
 }
 
-// Full access: Touch ID, or a second dialog whose default is Cancel.
-async function confirmFullAccess(request) {
-  const touched = await confirmWithTouchId('run a command with full access');
-  if (touched !== undefined) return touched;
-  return (await messageBox(fullAccessConfirmation(request), computerParent())).response === 1;
+// Full access: Touch ID where the Mac has it. Elsewhere the prompt itself is the confirmation: its Run
+// says "Run with full access" and takes no answer until it has been in front for a moment.
+async function confirmFullAccess() {
+  return (await confirmWithTouchId('run a command with full access')) !== false;
 }
 
 // Away mode's questions: how long and whether with internet, then the command budget.
@@ -782,9 +834,16 @@ function isActivitySender(event) {
     event.senderFrame === event.sender.mainFrame && isActivityPage(event.senderFrame?.url);
 }
 
+// The pages that use Use My Computer: the agents dashboard and 1904 Settings → Computers. No other
+// 1904 page can reach it, so content 1904 might show on another page never can either.
+function isComputerPage(href) {
+  const url = webUrl(href);
+  return isTaskTitleBarPage(href) || (url?.origin === ORIGIN && url.pathname.replace(/\/$/, '') === '/settings/computers');
+}
+
 function isComputerDashboardSender(event) {
   return Boolean(dashboardContents) && event.sender === dashboardContents && event.senderFrame === event.sender.mainFrame &&
-    is1904(event.senderFrame?.url);
+    isComputerPage(event.senderFrame?.url);
 }
 
 function showActivity({ focus = true } = {}) {
@@ -812,6 +871,129 @@ function showActivity({ focus = true } = {}) {
   return win;
 }
 
+// ── The prompt window ──────────────────────────────────────────────────────
+// One request at a time (the bridge's queue). A local page with no script of its own; its preload
+// renders the view and answers with the nonce of the request it shows. Closing it declines.
+
+function isApprovalPage(url) {
+  try {
+    const file = fileURLToPath(url);
+    return process.platform === 'win32' ? file.toLowerCase() === APPROVAL_PAGE.toLowerCase() : file === APPROVAL_PAGE;
+  } catch {
+    return false;
+  }
+}
+
+function isApprovalSender(event) {
+  return Boolean(approvalWindow) && !approvalWindow.isDestroyed() && event.sender === approvalWindow.webContents &&
+    event.senderFrame === event.sender.mainFrame && isApprovalPage(event.senderFrame?.url);
+}
+
+function approvalIcon() {
+  if (approvalIconUrl === undefined) {
+    try { approvalIconUrl = nativeImage.createFromPath(ICON).resize({ width: 40, height: 40 }).toDataURL(); } catch { approvalIconUrl = ''; }
+  }
+  return approvalIconUrl;
+}
+
+function settleApproval(answer) {
+  const pending = approvalPending;
+  approvalPending = undefined;
+  pending?.resolve(answer);
+}
+
+function approvalWindowNow() {
+  if (approvalWindow && !approvalWindow.isDestroyed()) return approvalWindow;
+  const mac = process.platform === 'darwin';
+  const palette = PALETTE[activeTheme()];
+  const parent = computerParent();
+  const win = new BrowserWindow({
+    title: 'Use My Computer', icon: ICON, width: 580, height: 640, minWidth: 460, minHeight: 360,
+    parent: parent && !parent.isDestroyed() ? parent : undefined, modal: false, show: false,
+    minimizable: false, maximizable: false, fullscreenable: false, backgroundColor: palette.color,
+    titleBarStyle: 'hidden',
+    ...(mac ? { trafficLightPosition: { x: 14, y: 13 } } : { titleBarOverlay: { ...palette, height: 40 } }),
+    webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'approval-preload.cjs') },
+  });
+  approvalWindow = win;
+  win.on('focus', () => { if (approvalPending) approvalPending.focusedAt = Date.now(); });
+  win.on('closed', () => {
+    if (approvalWindow === win) approvalWindow = undefined;
+    // Closing the window is a Decline.
+    settleApproval({ action: 'decline' });
+  });
+  approvalLoaded = win.loadFile(APPROVAL_PAGE).then(() => true, () => false);
+  return win;
+}
+
+// Waits for a pause in the person's typing and clicking in the dashboard, so the prompt never opens
+// under a key press or click meant for something else.
+async function quietInput(signal) {
+  const until = Date.now() + APPROVAL_QUIET_MAX_MS;
+  while (!signal?.aborted && computerInput.idleMs() < APPROVAL_QUIET_MS && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+}
+
+function showApprovalPrompt(view, signal) {
+  return new Promise(resolve => {
+    void (async () => {
+      if (signal?.aborted) return resolve({ action: 'decline' });
+      await quietInput(signal);
+      if (signal?.aborted) return resolve({ action: 'decline' });
+      const win = approvalWindowNow();
+      if (!(await approvalLoaded) || win.isDestroyed() || signal?.aborted) return resolve({ action: 'decline' });
+      settleApproval({ action: 'decline' });
+      const nonce = randomUUID();
+      approvalPending = { nonce, resolve, shownAt: Date.now(), focusedAt: 0 };
+      signal?.addEventListener('abort', () => {
+        if (approvalPending?.nonce === nonce) settleApproval({ action: 'decline' });
+      }, { once: true });
+      win.webContents.send('1904:approval-show', { nonce, view, theme: activeTheme(), platform: computerPlatform(), icon: approvalIcon() });
+      // In front only when the person is already in 1904 Desktop; otherwise it waits behind, and
+      // computerAttention says so. Either way Run waits until the window has been in front a moment.
+      const inDesktop = BrowserWindow.getFocusedWindow() !== null;
+      if (inDesktop) {
+        win.show();
+        win.focus();
+        approvalPending.focusedAt = Date.now();
+      } else {
+        win.showInactive();
+        if (process.platform === 'win32') win.flashFrame(true);
+      }
+    })().catch(() => resolve({ action: 'decline' }));
+  });
+}
+
+function closeApprovalPrompt() {
+  settleApproval({ action: 'decline' });
+  if (approvalWindow && !approvalWindow.isDestroyed()) approvalWindow.close();
+}
+
+// The window's answer, for the request it shows now. Run and away mode count only once the window has
+// been in front for APPROVAL_ARM_MS; the preload holds Run back the same way.
+function onApprovalAnswer(event, answer) {
+  if (!isApprovalSender(event) || !approvalPending || answer?.nonce !== approvalPending.nonce) return;
+  const action = ['run', 'decline', 'folder', 'away'].includes(answer.action) ? answer.action : 'decline';
+  if (action === 'run' || action === 'away') {
+    const since = Math.max(approvalPending.shownAt, approvalPending.focusedAt || Infinity);
+    if (!approvalWindow.isFocused() || !(Date.now() - since >= APPROVAL_ARM_MS)) return;
+  }
+  settleApproval({
+    action,
+    scope: ['once', 'message', 'task'].includes(answer.scope) ? answer.scope : 'once',
+    minutes: Number.isInteger(answer.minutes) ? answer.minutes : undefined,
+    network: answer.network === true,
+  });
+}
+
+function onApprovalSize(event, height) {
+  if (!isApprovalSender(event) || !Number.isFinite(height)) return;
+  const area = screen.getDisplayMatching(approvalWindow.getBounds()).workArea;
+  const [width] = approvalWindow.getContentSize();
+  approvalWindow.setContentSize(width, Math.round(Math.min(area.height * 0.9, Math.max(360, height))));
+}
+
 function computerFolders() {
   if (!computerBridge) return [];
   const chosen = computerLink.folders.all();
@@ -827,7 +1009,7 @@ function computerFolders() {
 
 function activityState(output) {
   if (!computerBridge) {
-    return { connection: { connected: false, text: 'Use My Computer is available in 1904 Desktop for macOS and Windows.' }, runs: [], history: [], away: [], folders: [] };
+    return { connection: { connected: false, text: 'Use My Computer is available in 1904 Desktop for macOS and Windows.' }, runs: [], history: [], away: [], allowances: [], folders: [] };
   }
   return { ...computerBridge.snapshot({ output }), folders: computerFolders() };
 }
@@ -868,7 +1050,7 @@ function sendComputerIndicator() {
 
 function computerChanged() {
   sendComputerIndicator();
-  const key = JSON.stringify([computerState(), computerBridge?.away().map(lease => lease.id)]);
+  const key = JSON.stringify([computerState(), computerBridge?.away().map(lease => lease.id), computerBridge?.taskAllowances().map(entry => entry.taskId)]);
   if (key !== computerMenuKey) {
     computerMenuKey = key;
     installMenu();
@@ -931,7 +1113,7 @@ function connectComputer() {
           name: computerPolicy.defaultComputerName(os.hostname()), platform, appVersion: app.getVersion(),
           shell: computerPolicy.computerShell({ platform, env: process.env, exists: existsSync }).name,
         },
-        confirm: async name => (await messageBox(connectPrompt(name), parent)).response === 1,
+        confirm: async (name, person) => (await messageBox(connectPrompt(name, person), parent)).response === 1,
         notice: ({ message, detail }) => messageBox({ type: 'info', title: 'Use My Computer', message, detail, buttons: ['OK'] }, parent),
       });
       if (connected) computerBridge.start();
@@ -981,16 +1163,13 @@ function startComputer() {
     leases: createAwayLeases({ file: path.join(userData, 'computer-away.json') }),
     log: computerLog = createActivityLog({ file: path.join(userData, 'computer-activity.jsonl') }),
     userData, tmpRoot: os.tmpdir(), exists: existsSync, realpathSync,
-    fs: { mkdir, stat, mkdtemp, rm, realpath }, spawn, kill: (pid, signal) => process.kill(pid, signal),
+    fs: { mkdir, stat, mkdtemp, rm, realpath, writeFile }, spawn, kill: (pid, signal) => process.kill(pid, signal), gitIdentity,
     clock: { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: timer => clearTimeout(timer) },
-    ask: createDialogAsk({
+    ask: createPromptAsk({
       computerName: () => computerLink.info()?.name || computerPolicy.defaultComputerName(os.hostname()),
-      showMessageBox: (view, signal) => messageBox({
-        type: view.full ? 'warning' : 'question', title: view.title, message: view.message, detail: view.detail, buttons: view.buttons,
-        defaultId: view.defaultId, cancelId: view.cancelId, noLink: true, signal,
-        ...(view.checkboxLabel ? { checkboxLabel: view.checkboxLabel, checkboxChecked: false } : {}),
-      }, computerParent()),
-      chooseFolder: appRef => chooseComputerFolder(appRef, computerParent()),
+      showPrompt: showApprovalPrompt,
+      closePrompt: closeApprovalPrompt,
+      chooseFolder: appRef => chooseComputerFolder(appRef, approvalWindow && !approvalWindow.isDestroyed() ? approvalWindow : computerParent()),
       attention: computerAttention,
       confirmFull: confirmFullAccess,
     }),
@@ -1010,7 +1189,13 @@ function startComputer() {
 
 function installComputerHandlers() {
   ipcMain.handle('1904:computer-state', event => isComputerDashboardSender(event) ? computerState() : null);
-  ipcMain.handle('1904:computer-connect', event => isComputerDashboardSender(event) ? connectComputer() : null);
+  // Connecting asks 1904 for a pairing before its question, so the page may start it only right after
+  // the person typed or clicked in the window, with it in front.
+  ipcMain.handle('1904:computer-connect', event => {
+    if (!isComputerDashboardSender(event)) return null;
+    if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) return computerState();
+    return connectComputer();
+  });
   ipcMain.handle('1904:computer-away', (event, input) => isComputerDashboardSender(event) ? startAwayFromDashboard(input) : null);
   ipcMain.on('1904:computer-activity', (event) => {
     if (isComputerDashboardSender(event)) showActivity();
@@ -1029,6 +1214,11 @@ function installComputerHandlers() {
   ipcMain.on('1904:activity-end-away', (event, id) => {
     if (isActivitySender(event) && computerPolicy.computerId(id)) computerBridge?.endAway(id);
   });
+  ipcMain.on('1904:activity-end-allowance', (event, taskId) => {
+    if (isActivitySender(event) && typeof taskId === 'string' && /^[a-f0-9]{32}$/.test(taskId)) computerBridge?.endTaskAllowance(taskId);
+  });
+  ipcMain.on('1904:approval-answer', onApprovalAnswer);
+  ipcMain.on('1904:approval-size', onApprovalSize);
   ipcMain.on('1904:activity-pause', (event, paused) => {
     if (isActivitySender(event) && typeof paused === 'boolean' && computerLink?.info()) setComputerPaused(paused);
   });
@@ -1085,5 +1275,6 @@ if (!app.requestSingleInstanceLock()) {
     installComputerHandlers();
     desktopReady = true;
     showDashboard();
+    startSmokeReport({ file: process.env.DESKTOP_SMOKE_REPORT, origin: ORIGIN, chrome: () => mainWindow?.webContents, dashboard: () => dashboardContents });
   });
 }

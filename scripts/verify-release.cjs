@@ -3,10 +3,38 @@ const { spawnSync } = require('node:child_process');
 const { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
+const { FuseV1Options, FuseVersion, getCurrentFuseWire } = require('@electron/fuses');
 const { parse } = require('yaml');
 const { version, productName } = require('../package.json');
-const config = require('./release.config.cjs');
 const { hash, verifyUpdateAssets } = require('./release-assets.cjs');
+
+// The Electron fuses every signed build must carry, written out here rather than read from
+// release.config.cjs so that a change there cannot quietly weaken what this check accepts.
+// GrantFileProtocolExtraPrivileges is not listed: the app still needs it on to load its own pages from
+// app.asar (see release.config.cjs), and the launch check fails if they cannot load.
+const RELEASE_FUSES = {
+  RunAsNode: false,
+  EnableNodeOptionsEnvironmentVariable: false,
+  EnableNodeCliInspectArguments: false,
+  EnableEmbeddedAsarIntegrityValidation: true,
+  OnlyLoadAppFromAsar: true,
+  EnableCookieEncryption: true,
+};
+// How the binary stores a fuse: the character '1' (on) or '0' (off).
+const FUSE_ON = '1'.charCodeAt(0);
+const FUSE_OFF = '0'.charCodeAt(0);
+
+// Reads the fuse wire from the packaged executable (on a Mac, from its Electron Framework). Release Mac
+// builds are single-architecture (checked with lipo below), so the binary has one wire.
+async function verifyFuses(executable) {
+  const wire = await getCurrentFuseWire(executable);
+  assert.equal(wire.version, FuseVersion.V1, `Unexpected Electron fuse wire version ${wire.version}`);
+  for (const [name, on] of Object.entries(RELEASE_FUSES)) {
+    const state = wire[FuseV1Options[name]];
+    assert.equal(state, on ? FUSE_ON : FUSE_OFF,
+      `The ${name} fuse must be ${on ? 'on' : 'off'} in the release build, found ${state === undefined ? 'no such fuse' : String.fromCharCode(state)}`);
+  }
+}
 
 function run(command, args, env = process.env) {
   const result = spawnSync(command, args, { stdio: 'inherit', env });
@@ -24,6 +52,7 @@ function verifyWindowsSignature(path) {
 }
 
 async function verify() {
+  const config = require('./release.config.cjs');
   const windows = process.platform === 'win32';
   const platform = windows ? 'win' : 'mac';
   const arch = process.arch;
@@ -59,6 +88,7 @@ async function verify() {
     assert.equal(update.owner, config.publish.owner);
     assert.equal(update.repo, config.publish.repo);
     if (windows) assert.ok(update.publisherName?.includes(process.env.DESKTOP_WINDOWS_PUBLISHER));
+    await verifyFuses(executable);
     run(process.execPath, [join(__dirname, 'smoke-release.cjs'), executable]);
   } finally {
     rmSync(temp, { recursive: true, force: true, maxRetries: 3 });
@@ -76,4 +106,8 @@ async function verify() {
   console.log(`Verified and staged ${platform}/${arch} ${version}`);
 }
 
-verify().catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) {
+  verify().catch(error => { console.error(error); process.exitCode = 1; });
+}
+
+module.exports = { RELEASE_FUSES, verifyFuses };

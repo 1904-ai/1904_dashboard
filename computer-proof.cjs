@@ -11,7 +11,8 @@ const path = require('node:path');
 const { COMPUTER_OWN_MESSAGE_MS, COMPUTER_PROOF_HEADER } = require('./computer-policy.cjs');
 
 const PROOF_CONTEXT = '1904-computer-proof\nv1\n';
-const MESSAGE_PATH = /^\/api\/apps\/[A-Za-z0-9_-]{1,128}\/agent-workspaces$/;
+const MESSAGE_PATH = /^\/api\/apps\/([A-Za-z0-9_-]{1,128})\/agent-workspaces$/;
+const APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const MESSAGE_ID = /^[a-f0-9-]{36}$/;
 const TASK_ID = /^[a-f0-9]{32}$/;
 /** A message body larger than this is not read, so not stamped. */
@@ -48,6 +49,15 @@ function stampableRequest({ method, url, origin }) {
     return target.origin === origin && !target.username && !target.password && !target.search && !target.hash && MESSAGE_PATH.test(target.pathname);
   } catch {
     return false;
+  }
+}
+
+/** The app a stamped message was sent to, from its URL (stampableRequest already checked the rest). */
+function messageAppId(url) {
+  try {
+    return MESSAGE_PATH.exec(new URL(url).pathname)?.[1];
+  } catch {
+    return undefined;
   }
 }
 
@@ -101,6 +111,10 @@ function stampDecision({ lastInputAt, now, focused, windowMs = COMPUTER_STAMP_IN
 function createInputTracker({ now = Date.now, windowMs = COMPUTER_STAMP_INPUT_MS } = {}) {
   let lastInputAt;
   return {
+    /** A new page in the window: input on the page before it does not count for this one. */
+    reset() { lastInputAt = undefined; },
+    /** How long since the last real input, or Infinity. A prompt waits for a pause in typing and clicking. */
+    idleMs() { return Number.isFinite(lastInputAt) ? Math.max(0, now() - lastInputAt) : Infinity; },
     /** 'before-input-event': a key pressed. Holding a key down (auto-repeat) is not new input. */
     key(input) {
       if (input?.type === 'keyDown' && input.isAutoRepeat !== true) lastInputAt = now();
@@ -131,7 +145,9 @@ function createMessageLog({ file, now = Date.now, keepMs = COMPUTER_OWN_MESSAGE_
       const value = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (Array.isArray(value)) {
         for (const entry of value) {
-          if (MESSAGE_ID.test(entry?.id) && Number.isFinite(entry?.at)) entries.set(entry.id, { taskId: TASK_ID.test(entry.taskId) ? entry.taskId : '', at: entry.at });
+          if (MESSAGE_ID.test(entry?.id) && Number.isFinite(entry?.at)) {
+            entries.set(entry.id, { taskId: TASK_ID.test(entry.taskId) ? entry.taskId : '', appId: APP_ID.test(entry.appId ?? '') ? entry.appId : '', at: entry.at });
+          }
         }
       }
     } catch (error) {
@@ -153,21 +169,22 @@ function createMessageLog({ file, now = Date.now, keepMs = COMPUTER_OWN_MESSAGE_
     }
   }
   return {
-    record(messageId, taskId) {
-      if (!MESSAGE_ID.test(messageId) || !TASK_ID.test(taskId ?? '')) return false;
+    /** `appId`: the app the message was sent to (messageAppId); a request must name the same app. */
+    record(messageId, taskId, appId) {
+      if (!MESSAGE_ID.test(messageId) || !TASK_ID.test(taskId ?? '') || !APP_ID.test(appId ?? '')) return false;
       load();
       entries.delete(messageId);
-      entries.set(messageId, { taskId: TASK_ID.test(taskId) ? taskId : '', at: now() });
+      entries.set(messageId, { taskId, appId, at: now() });
       prune();
       save();
       return true;
     },
-    /** Sent from here within the last six hours, for exactly this task. */
-    has(messageId, taskId) {
+    /** Sent from here within the last six hours, for exactly this task and app. */
+    has(messageId, taskId, appId) {
       load();
       prune();
       const entry = entries.get(messageId);
-      return Boolean(entry && TASK_ID.test(taskId ?? '') && entry.taskId === taskId);
+      return Boolean(entry && TASK_ID.test(taskId ?? '') && entry.taskId === taskId && APP_ID.test(appId ?? '') && entry.appId === appId);
     },
     clear() {
       entries = new Map();
@@ -177,6 +194,6 @@ function createMessageLog({ file, now = Date.now, keepMs = COMPUTER_OWN_MESSAGE_
 }
 
 module.exports = {
-  PROOF_CONTEXT, BODY_MAX, PROOF_KEY, COMPUTER_STAMP_INPUT_MS, proofKeyBytes, proofInput, proofHeader, stampableRequest, uploadBody,
+  PROOF_CONTEXT, BODY_MAX, PROOF_KEY, COMPUTER_STAMP_INPUT_MS, proofKeyBytes, proofInput, proofHeader, stampableRequest, messageAppId, uploadBody,
   messageInBody, stampDecision, createInputTracker, withoutProof, createMessageLog,
 };
