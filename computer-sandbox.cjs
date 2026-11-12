@@ -60,7 +60,7 @@ function caseless(pattern) {
 }
 
 /** `folder` and everything in it, in any case, as a regex. */
-const caselessSubpath = folder => `^${caseless(folder.replace(/\./g, '\\.'))}(/.*)?$`;
+const caselessSubpath = folder => `^${caseless(folder.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&'))}(/.*)?$`;
 
 /**
  * Toolchain folders under the home folder a command may read (never write), so installed runtimes
