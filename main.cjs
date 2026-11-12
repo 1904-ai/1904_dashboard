@@ -14,6 +14,7 @@ const { SCHEME, IMPORT_PATH, taskUrl, repositorySetupUrl, readLink, startSignIn 
 const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
 const { CRASH_WINDOW_MS, retryDelay, isServerFailure, retryTarget, recoveryView } = require('./desktop-recovery.cjs');
 const { installContextMenu } = require('./context-menu.cjs');
+const { taskTabCommand } = require('./task-tab-keys.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
 const { createComputerBridge } = require('./computer-bridge.cjs');
@@ -59,6 +60,9 @@ let dashboardView;
 let dashboardContents;
 let dashboardTheme;
 let taskTitleBar = false;
+// Set by the Agents page while a task's tab strip is on screen: Ctrl/Cmd+T, Ctrl/Cmd+W and Ctrl+Tab then
+// drive its tabs. Off, every key does what it always did, so Ctrl/Cmd+W closes the window.
+let taskTabKeys = false;
 let signInPromptOpen = false;
 let signInAttempt;
 let queuedLink;
@@ -148,6 +152,7 @@ function startRecovery(kind, failedUrl) {
   const attempts = recovery?.attempts ?? 0;
   if (!recovery) {
     setTaskTitleBar(false);
+    taskTabKeys = false;
     dashboardTheme = undefined;
     syncTitleBar();
     dashboardView.setVisible(false);
@@ -458,6 +463,9 @@ function installChromeHandlers() {
   ipcMain.on('1904:task-title-bar', (event, active) => {
     if (isTaskTitleBarSender(event) && typeof active === 'boolean') setTaskTitleBar(active);
   });
+  ipcMain.on('1904:task-tab-keys', (event, active) => {
+    if (isTaskTitleBarSender(event) && typeof active === 'boolean') taskTabKeys = active;
+  });
   ipcMain.on('1904:task-title-bar-menu', (event) => {
     if (!taskTitleBar || !isTaskTitleBarSender(event)) return;
     Menu.getApplicationMenu()?.popup({ window: mainWindow, x: process.platform === 'darwin' ? 82 : 12, y: CHROME_HEIGHT });
@@ -517,6 +525,15 @@ function createWindow() {
   dashboardContents = contents;
   // Real input reaches these from the operating system; events a page dispatches itself never do.
   contents.on('before-input-event', (_event, input) => computerInput.key(input));
+  // Only while the Agents page has said a task's tabs are on screen; otherwise nothing is held back here.
+  contents.on('before-input-event', (event, input) => {
+    if (!taskTabKeys || !isTaskTitleBarPage(contents.getURL())) return;
+    const command = taskTabCommand(input, process.platform);
+    if (!command) return;
+    // Also keeps the key from the menu, so Ctrl/Cmd+W closes the task's tab and not the window.
+    event.preventDefault();
+    contents.send('1904:task-tab-command', command);
+  });
   contents.on('input-event', (_event, input) => computerInput.pointer(input));
   // A click that loaded a new page does not count as input on that page.
   contents.on('did-start-navigation', (details, _url, isInPlace, isMainFrame) => {
@@ -537,6 +554,7 @@ function createWindow() {
       dashboardContents = undefined;
       dashboardTheme = undefined;
       taskTitleBar = false;
+      taskTabKeys = false;
       clearTimeout(recovery?.timer);
       recovery = undefined;
     }
@@ -546,14 +564,19 @@ function createWindow() {
 
   contents.on('did-navigate', (_event, url, httpResponseCode) => {
     setTaskTitleBar(false);
+    taskTabKeys = false;
     if (!is1904(url)) return;
     // Not emitted for Chromium's own error pages, so this is always a real answer from 1904.
     if (isServerFailure(httpResponseCode) && url !== challengeUrl) startRecovery('unavailable', url);
     else endRecovery();
   });
   contents.on('did-navigate-in-page', (_event, _url, isMainFrame) => {
-    if (!isTaskTitleBarPage(contents.getURL())) setTaskTitleBar(false);
-    // Back on the Agents page without a reload (Settings closed over it): the page's own request stands again.
+    if (!isTaskTitleBarPage(contents.getURL())) {
+      setTaskTitleBar(false);
+      taskTabKeys = false;
+    }
+    // Back on the Agents page without a reload (Settings closed over it): the page's own requests (the
+    // title bar and the tab keys) stand again.
     else if (isMainFrame) contents.send('1904:task-title-bar-replay');
   });
   contents.on('dom-ready', () => {
