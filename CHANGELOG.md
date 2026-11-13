@@ -20,6 +20,7 @@
 - A page that crashes reloads by itself. If it crashes again straight away, you get a Reload button instead of a loop.
 - Import a repository from the **…** menu under Help.
 - The active task’s name and actions sit in the title bar.
+- When a task shows its tabs, **Ctrl+T** and **Ctrl+W** (**Cmd+T** and **Cmd+W** on macOS) open and close the task’s tabs, and **Ctrl+Tab** and **Ctrl+Shift+Tab** move between them. Anywhere else, **Ctrl+W** (**Cmd+W**) still closes the window.
 - Updates are published through GitHub Releases.
 - Right-click works: cut, copy, paste and select all in text boxes, copy selected text, open a link in your browser or copy its address, copy an image, and fix a misspelled word or add it to the dictionary.
 - **Open Copied 1904 Link** opens the copied link instead of showing a JavaScript error.

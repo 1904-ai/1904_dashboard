@@ -16,7 +16,7 @@ Choose **1904 → Sign In with Browser**, sign in to 1904, then choose **Open 19
 
 The app needs internet access. Use **View → Reload** to reconnect after a failed load. The native notification settings for 1904 Desktop control dashboard notifications on this device.
 
-The title bar follows the dashboard theme. Use **…** in the title bar to open the application menu. The app restores its window size and position. The overview scrolls within the task list or status board, and F6 and Shift+F6 move focus between workspace panes.
+The title bar follows the dashboard theme. Use **…** in the title bar to open the application menu. The app restores its window size and position. The overview scrolls within the task list or status board, and F6 and Shift+F6 move focus between workspace panes. When a task shows its tabs, Ctrl+T and Ctrl+W (Cmd+T and Cmd+W on macOS) open and close the task’s tabs and Ctrl+Tab and Ctrl+Shift+Tab move between them; anywhere else, Ctrl+W (Cmd+W) closes the window.
 
 Open **… → Help** for the installed version, release notes, documentation, and support. Signed builds with an update feed show **Restart to Update** in Help when an update is ready.
 
