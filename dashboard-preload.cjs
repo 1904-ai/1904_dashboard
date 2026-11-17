@@ -9,6 +9,11 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
   const TAB_COMMANDS = ['new', 'close', 'next', 'previous'];
   const tabCommandListeners = new Set();
   contextBridge.exposeInMainWorld('desktop1904', {
+    snippet: {
+      capture: requestId => navigator.userActivation.isActive
+        ? ipcRenderer.invoke('1904:snippet-start', requestId) : Promise.resolve(null),
+      cancel: requestId => ipcRenderer.send('1904:snippet-cancel', requestId),
+    },
     notifyTask: item => ipcRenderer.invoke('1904:task-notification', item),
     taskTitleBar: {
       platform: process.platform === 'darwin' ? 'macos' : 'windows',

@@ -43,6 +43,7 @@
       "chrome.html",
       "activity.html",
       "approval.html",
+      "snippet-capture.html",
       "dashboard.css",
       "assets/icon.png",
       "package.json",
