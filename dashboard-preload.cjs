@@ -1,8 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
-  // What the page last asked for. Leaving the Agents page in place (Settings opens over it) takes the title bar
-  // back; on the way back 1904 Desktop asks for this again, since the page may not ask a second time.
+  // What the mounted page last asked for. In-page navigation replays it, including Settings overlays;
+  // the main process still restricts task keys to Agents routes.
   let titleBarWanted = false;
   // The same for the tab keys: whether Ctrl/Cmd+T, Ctrl/Cmd+W and Ctrl+Tab should drive the task's tabs now.
   let tabKeysWanted = false;
