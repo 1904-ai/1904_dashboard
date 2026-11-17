@@ -2,6 +2,18 @@
   "version": 1,
   "checks": [
     {
+      "name": "desktop-settings-navigation",
+      "command": [
+        "node",
+        "--test",
+        "test/settings-navigation.test.cjs",
+        "test/task-tab-keys.test.cjs",
+        "test/browser-bridge.test.cjs",
+        "test/browser-extension.test.cjs"
+      ],
+      "automatic": true
+    },
+    {
       "name": "desktop-screen-capture",
       "command": ["node", "--test", "test/screen-capture.test.cjs"],
       "automatic": true

@@ -1,8 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
-  // What the page last asked for. Leaving the Agents page in place (Settings opens over it) takes the title bar
-  // back; on the way back 1904 Desktop asks for this again, since the page may not ask a second time.
+  // What the mounted page last asked for. In-page navigation replays it, including Settings overlays;
+  // the main process still restricts task keys to Agents routes.
   let titleBarWanted = false;
   // The same for the tab keys: whether Ctrl/Cmd+T, Ctrl/Cmd+W and Ctrl+Tab should drive the task's tabs now.
   let tabKeysWanted = false;
@@ -37,6 +37,14 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
     // Use My Computer: whether this computer is connected or paused, and ways to start connecting it
     // or start away mode for a task (the person answers every question natively). Nothing here can
     // run a command, answer a request, read output, or end the person's control.
+    browser: {
+      state: () => ipcRenderer.invoke('1904:browser-state'),
+      setPreference: value => ipcRenderer.invoke('1904:browser-preference', value),
+      setup: () => ipcRenderer.invoke('1904:browser-setup'),
+      execute: input => ipcRenderer.invoke('1904:browser-execute', {appId:input?.appId,taskId:input?.taskId,taskTab:input?.taskTab,session:input?.session,requestId:input?.requestId}),
+      focus: input => ipcRenderer.invoke('1904:browser-focus', {appId:input?.appId,taskId:input?.taskId,taskTab:input?.taskTab,session:input?.session}),
+      release: input => ipcRenderer.invoke('1904:browser-release', {appId:input?.appId,taskId:input?.taskId,taskTab:input?.taskTab,session:input?.session}),
+    },
     computer: {
       state: () => ipcRenderer.invoke('1904:computer-state'),
       connect: () => ipcRenderer.invoke('1904:computer-connect'),
