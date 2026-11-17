@@ -18,6 +18,7 @@ const { taskTabCommand } = require('./task-tab-keys.cjs');
 const { installScreenCapture } = require('./screen-capture.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
+const { createDesktopBrowserBridge } = require('./browser-bridge.cjs');
 const { createComputerBridge } = require('./computer-bridge.cjs');
 const { createPromptAsk } = require('./computer-approval.cjs');
 const computerProof = require('./computer-proof.cjs');
@@ -81,6 +82,7 @@ let updateReady = false;
 // Use My Computer (see the section below main's window code).
 let computerLink;
 let computerBridge;
+let desktopBrowserBridge;
 let computerConnecting;
 let computerQuitting = false;
 let computerMenuKey;
@@ -1231,6 +1233,50 @@ function startComputer() {
   computerBridge.start();
 }
 
+function startDesktopBrowser() {
+  desktopBrowserBridge = createDesktopBrowserBridge({
+    file: path.join(app.getPath('userData'), 'browser-settings.json'), fetch: sessionFetch, origin: ORIGIN,
+    confirm: async ({site}) => (await messageBox({type:'question',title:'Use your browser',message:'Share this browser tab with the task?',detail:`Website: ${site}\nOnly this selected tab is shared. Its page and screenshots go to the task; cookies stay on this computer. Browser actions still use the task’s approval controls.`,buttons:['Cancel','Share tab'],defaultId:0,cancelId:0,noLink:true},computerParent())).response === 1,
+  });
+  powerMonitor.on('suspend', () => desktopBrowserBridge.pause());
+  powerMonitor.on('resume', () => desktopBrowserBridge.resume());
+  app.on('will-quit', () => desktopBrowserBridge.close());
+}
+async function setupDesktopBrowser() {
+  const code = await desktopBrowserBridge.setup();
+  const {response} = await messageBox({type:'info',title:'Connect your browser',message:'Connect Chrome or Edge',detail:'Load the 1904 browser extension, then open it on the tab you want to share. Paste a connection code from here and select Share this tab. You approve each task separately. Safari and Firefox are not supported yet.',buttons:['Cancel','Copy connection code','Open extension folder'],defaultId:0,cancelId:0,noLink:true},computerParent());
+  if(response===1)clipboard.writeText(code);
+  if(response===2){
+    const folder=path.join(app.getPath('userData'),'browser-extension');
+    await mkdir(folder,{recursive:true});
+    for(const name of ['manifest.json','popup.html','popup.js','worker.js'])await writeFile(path.join(folder,name),await require('node:fs/promises').readFile(path.join(app.getAppPath(),'browser-extension',name)));
+    await shell.openPath(folder);
+  }
+  return desktopBrowserBridge.state();
+}
+function installDesktopBrowserHandlers() {
+  ipcMain.handle('1904:browser-state', event => isComputerDashboardSender(event) ? desktopBrowserBridge.state() : null);
+  ipcMain.handle('1904:browser-preference', (event,value) => {
+    if(!isComputerDashboardSender(event)||!['auto','desktop','cloud'].includes(value))return null;
+    return desktopBrowserBridge.setPreference(value);
+  });
+  ipcMain.handle('1904:browser-setup', event => {
+    if(!isComputerDashboardSender(event)||!computerInput.decide({focused:Boolean(mainWindow?.isFocused())&&Boolean(dashboardContents?.isFocused())}).stamp)return null;
+    return setupDesktopBrowser();
+  });
+  ipcMain.handle('1904:browser-execute', (event,input) => {
+    if(!isComputerDashboardSender(event)||!isTaskTitleBarPage(event.senderFrame?.url))return null;
+    return desktopBrowserBridge.execute(input);
+  });
+  ipcMain.handle('1904:browser-focus', (event,input) => {
+    if(!isComputerDashboardSender(event)||!isTaskTitleBarPage(event.senderFrame?.url))return null;
+    return desktopBrowserBridge.focus(input);
+  });
+  ipcMain.handle('1904:browser-release', (event,input) => {
+    if(isComputerDashboardSender(event))desktopBrowserBridge.release(input||{});
+  });
+}
+
 function installComputerHandlers() {
   ipcMain.handle('1904:computer-state', event => isComputerDashboardSender(event) ? computerState() : null);
   // Connecting asks 1904 for a pairing before its question, so the page may start it only right after
@@ -1314,9 +1360,11 @@ if (!app.requestSingleInstanceLock()) {
       installMenu();
     });
     startComputer();
+    startDesktopBrowser();
     installMenu();
     installChromeHandlers();
     installComputerHandlers();
+    installDesktopBrowserHandlers();
     desktopReady = true;
     showDashboard();
     startSmokeReport({ file: process.env.DESKTOP_SMOKE_REPORT, origin: ORIGIN, chrome: () => mainWindow?.webContents, dashboard: () => dashboardContents });
