@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "checks": [
+    {
+      "name": "desktop-screen-capture",
+      "command": ["node", "--test", "test/screen-capture.test.cjs"],
+      "automatic": true
+    }
+  ]
+}

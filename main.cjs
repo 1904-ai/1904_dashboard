@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerMonitor, safeStorage, screen, session, shell, systemPreferences } = require('electron');
+const { app, BrowserWindow, WebContentsView, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerMonitor, safeStorage, screen, session, shell, systemPreferences } = require('electron');
 const { guardStartup, startSmokeReport } = require('./startup-guard.cjs');
 // A packaged build started with a debugging switch exits here, before Chromium or Node.js can act on it.
 guardStartup(app);
@@ -15,6 +15,7 @@ const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
 const { CRASH_WINDOW_MS, retryDelay, isServerFailure, retryTarget, recoveryView } = require('./desktop-recovery.cjs');
 const { installContextMenu } = require('./context-menu.cjs');
 const { taskTabCommand } = require('./task-tab-keys.cjs');
+const { installScreenCapture } = require('./screen-capture.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
 const { createComputerBridge } = require('./computer-bridge.cjs');
@@ -391,11 +392,21 @@ function installPermissionRules() {
     callback({});
   });
   const ordinaryPermissions = new Set(['clipboard-sanitized-write', 'fullscreen', 'notifications']);
+  const screenCaptureAllowed = installScreenCapture(profile, {
+    getContents: () => dashboardContents, getWindow: () => mainWindow, desktopCapturer, Menu, is1904,
+    onError: () => dialog.showErrorBox('Could not capture your screen',
+      'Check screen recording permissions for 1904 Desktop in your system settings, then try again. You can also attach an image file.'),
+  });
   profile.setPermissionCheckHandler((contents, permission, origin, details) => {
+    if (permission === 'display-capture') return screenCaptureAllowed(contents, origin, details.isMainFrame);
     if (!is1904(contents?.getURL()) || !is1904(origin) || !details.isMainFrame) return false;
     return ordinaryPermissions.has(permission) || (permission === 'media' && details.mediaType === 'audio');
   });
   profile.setPermissionRequestHandler((contents, permission, callback, details) => {
+    if (permission === 'display-capture') {
+      callback(screenCaptureAllowed(contents, details.requestingUrl, details.isMainFrame));
+      return;
+    }
     const trusted = is1904(contents?.getURL()) && is1904(details.requestingUrl) && details.isMainFrame;
     const audioOnly = permission === 'media' && details.mediaTypes?.length === 1 && details.mediaTypes[0] === 'audio';
     callback(Boolean(trusted && (ordinaryPermissions.has(permission) || audioOnly)));
