@@ -16,6 +16,7 @@ const { CRASH_WINDOW_MS, retryDelay, isServerFailure, retryTarget, recoveryView 
 const { installContextMenu } = require('./context-menu.cjs');
 const { taskTabCommand } = require('./task-tab-keys.cjs');
 const { installScreenCapture } = require('./screen-capture.cjs');
+const { installSnippetCapture } = require('./snippet-capture.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
 const { createDesktopBrowserBridge } = require('./browser-bridge.cjs');
@@ -1365,6 +1366,12 @@ if (!app.requestSingleInstanceLock()) {
     installChromeHandlers();
     installComputerHandlers();
     installDesktopBrowserHandlers();
+    installSnippetCapture({
+      ipcMain, BrowserWindow, desktopCapturer, nativeImage, screen,
+      getContents: () => dashboardContents, getWindow: () => mainWindow, is1904: isTaskTitleBarPage,
+      permission: () => process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('screen') : 'granted',
+      theme: activeTheme,
+    });
     desktopReady = true;
     showDashboard();
     startSmokeReport({ file: process.env.DESKTOP_SMOKE_REPORT, origin: ORIGIN, chrome: () => mainWindow?.webContents, dashboard: () => dashboardContents });
