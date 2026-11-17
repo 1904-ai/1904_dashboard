@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "1904 Desktop Browser",
+  "version": "1.0.0",
+  "minimum_chrome_version": "118",
+  "description": "Share one signed-in tab with a task in 1904 Desktop. Cookies stay in your browser.",
+  "permissions": ["activeTab", "debugger", "storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {"service_worker": "worker.js"},
+  "action": {"default_popup": "popup.html", "default_title": "Share this tab with 1904"}
+}

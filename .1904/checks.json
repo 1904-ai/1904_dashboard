@@ -3,7 +3,14 @@
   "checks": [
     {
       "name": "desktop-settings-navigation",
-      "command": ["node", "--test", "test/settings-navigation.test.cjs", "test/task-tab-keys.test.cjs"],
+      "command": [
+        "node",
+        "--test",
+        "test/settings-navigation.test.cjs",
+        "test/task-tab-keys.test.cjs",
+        "test/browser-bridge.test.cjs",
+        "test/browser-extension.test.cjs"
+      ],
       "automatic": true
     },
     {

@@ -37,6 +37,14 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
     // Use My Computer: whether this computer is connected or paused, and ways to start connecting it
     // or start away mode for a task (the person answers every question natively). Nothing here can
     // run a command, answer a request, read output, or end the person's control.
+    browser: {
+      state: () => ipcRenderer.invoke('1904:browser-state'),
+      setPreference: value => ipcRenderer.invoke('1904:browser-preference', value),
+      setup: () => ipcRenderer.invoke('1904:browser-setup'),
+      execute: input => ipcRenderer.invoke('1904:browser-execute', {appId:input?.appId,taskId:input?.taskId,taskTab:input?.taskTab,session:input?.session,requestId:input?.requestId}),
+      focus: input => ipcRenderer.invoke('1904:browser-focus', {appId:input?.appId,taskId:input?.taskId,taskTab:input?.taskTab,session:input?.session}),
+      release: input => ipcRenderer.invoke('1904:browser-release', {appId:input?.appId,taskId:input?.taskId,taskTab:input?.taskTab,session:input?.session}),
+    },
     computer: {
       state: () => ipcRenderer.invoke('1904:computer-state'),
       connect: () => ipcRenderer.invoke('1904:computer-connect'),
