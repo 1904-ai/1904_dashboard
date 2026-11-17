@@ -97,18 +97,19 @@ test('other keys and odd input are never a command', () => {
   }
 });
 
-test('main honours the tab-key flag only from the Agents page’s main frame, and resets it with the title bar', () => {
+test('main honours the tab-key flag only from the Agents page’s main frame, and pauses it in Settings', () => {
   assert.match(main, /const \{ taskTabCommand \} = require\('\.\/task-tab-keys\.cjs'\);/);
   assert.match(main, /^let taskTabKeys = false;$/m);
   const setters = [...main.matchAll(/taskTabKeys = (?!false;)/g)];
   assert.equal(setters.length, 1, 'set from one place only');
-  assert.match(main, /ipcMain\.on\('1904:task-tab-keys', \(event, active\) => \{\n\s+if \(isTaskTitleBarSender\(event\) && typeof active === 'boolean'\) taskTabKeys = active;\n\s+\}\);/,
-    'the same sender check as the title bar, booleans only');
+  assert.match(main, /ipcMain\.on\('1904:task-tab-keys', \(event, active\) => \{\n\s+if \(isTaskTitleBarSender\(event\) && isTaskTitleBarPage\(event.senderFrame\?\.url\) && typeof active === 'boolean'\) taskTabKeys = active;\n\s+\}\);/,
+    'the title-bar sender check plus the narrower Agents route, booleans only');
   assert.equal([...main.matchAll(/'1904:task-tab-keys'/g)].length, 1, 'no other handler for it');
-  // Every place the title bar is taken back, the tab keys go with it.
+  // Document navigations reset both. Settings keeps the title bar and pauses only task keys.
   assert.match(main, /contents\.on\('did-navigate', \(_event, url, httpResponseCode\) => \{\n\s+setTaskTitleBar\(false\);\n\s+taskTabKeys = false;/);
-  assert.match(main, /if \(!isTaskTitleBarPage\(contents\.getURL\(\)\)\) \{\n\s+setTaskTitleBar\(false\);\n\s+taskTabKeys = false;\n\s+\}/);
-  assert.match(main, /else if \(isMainFrame\) contents\.send\('1904:task-title-bar-replay'\);/);
+  assert.match(main, /if \(!isTaskTitleBarPage\(href\)\) taskTabKeys = false;/);
+  assert.match(main, /if \(!isTaskTitleBarHost\(href\)\) setTaskTitleBar\(false\);/);
+  assert.match(main, /else contents\.send\('1904:task-title-bar-replay'\);/);
   assert.match(main, /if \(!recovery\) \{\n\s+setTaskTitleBar\(false\);\n\s+taskTabKeys = false;/);
   assert.match(main, /\n\s+taskTitleBar = false;\n\s+taskTabKeys = false;\n/, 'and when the window closes');
   assert.equal([...main.matchAll(/setTaskTitleBar\(false\)/g)].length, [...main.matchAll(/(?<!let )taskTabKeys = false;/g)].length - 1,

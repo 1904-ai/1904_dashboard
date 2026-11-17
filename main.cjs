@@ -441,9 +441,17 @@ function isTaskTitleBarPage(href) {
   return url?.origin === ORIGIN && ['/agents', '/agents-beta2'].includes(url.pathname);
 }
 
+// Settings overlays the mounted Agents page. Only its title bar may remain active there; task keys and
+// computer access keep their existing, narrower route checks.
+function isTaskTitleBarHost(href) {
+  const url = webUrl(href);
+  return isTaskTitleBarPage(href) || (url?.origin === ORIGIN &&
+    (url.pathname === '/settings' || url.pathname.startsWith('/settings/')));
+}
+
 function isTaskTitleBarSender(event) {
   return mainWindow && event.sender === dashboardContents && event.senderFrame === event.sender.mainFrame &&
-    isTaskTitleBarPage(event.senderFrame?.url);
+    isTaskTitleBarHost(event.senderFrame?.url);
 }
 
 function setTaskTitleBar(active) {
@@ -475,7 +483,7 @@ function installChromeHandlers() {
     if (isTaskTitleBarSender(event) && typeof active === 'boolean') setTaskTitleBar(active);
   });
   ipcMain.on('1904:task-tab-keys', (event, active) => {
-    if (isTaskTitleBarSender(event) && typeof active === 'boolean') taskTabKeys = active;
+    if (isTaskTitleBarSender(event) && isTaskTitleBarPage(event.senderFrame?.url) && typeof active === 'boolean') taskTabKeys = active;
   });
   ipcMain.on('1904:task-title-bar-menu', (event) => {
     if (!taskTitleBar || !isTaskTitleBarSender(event)) return;
@@ -582,13 +590,13 @@ function createWindow() {
     else endRecovery();
   });
   contents.on('did-navigate-in-page', (_event, _url, isMainFrame) => {
-    if (!isTaskTitleBarPage(contents.getURL())) {
-      setTaskTitleBar(false);
-      taskTabKeys = false;
-    }
-    // Back on the Agents page without a reload (Settings closed over it): the page's own requests (the
-    // title bar and the tab keys) stand again.
-    else if (isMainFrame) contents.send('1904:task-title-bar-replay');
+    if (!isMainFrame) return;
+    const href = contents.getURL();
+    if (!isTaskTitleBarPage(href)) taskTabKeys = false;
+    if (!isTaskTitleBarHost(href)) setTaskTitleBar(false);
+    // Keep the view at the same bounds through Settings; replay also supports older dashboard versions
+    // that release their header while the overlay is open, and restores task keys on return to Agents.
+    else contents.send('1904:task-title-bar-replay');
   });
   contents.on('dom-ready', () => {
     if (is1904(contents.getURL())) void contents.insertCSS(DASHBOARD_CSS).catch(() => {});
