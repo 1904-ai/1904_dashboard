@@ -8,8 +8,22 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
   let tabKeysWanted = false;
   const TAB_COMMANDS = ['new', 'close', 'next', 'previous'];
   const tabCommandListeners = new Set();
+  const openTaskListeners = new Set();
+  const syncOpenTaskReady = () => {
+    ipcRenderer.send('1904:task-navigation-ready', openTaskListeners.size > 0);
+  };
   contextBridge.exposeInMainWorld('desktop1904', {
     notifyTask: item => ipcRenderer.invoke('1904:task-notification', item),
+    onOpenTask: listener => {
+      if (typeof listener !== 'function') return () => {};
+      const entry = { listener };
+      openTaskListeners.add(entry);
+      syncOpenTaskReady();
+      return () => {
+        openTaskListeners.delete(entry);
+        syncOpenTaskReady();
+      };
+    },
     taskTitleBar: {
       platform: process.platform === 'darwin' ? 'macos' : 'windows',
       setActive: active => {
@@ -64,6 +78,16 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
     for (const { listener } of [...tabCommandListeners]) {
       try {
         listener(command);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+  });
+  ipcRenderer.on('1904:open-task', (_event, targetPath) => {
+    if (typeof targetPath !== 'string' || !targetPath.startsWith('/agents?')) return;
+    for (const { listener } of [...openTaskListeners]) {
+      try {
+        listener(targetPath);
       } catch (error) {
         console.error(error);
       }

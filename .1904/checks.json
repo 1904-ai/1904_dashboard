@@ -8,6 +8,7 @@
         "--test",
         "test/settings-navigation.test.cjs",
         "test/task-tab-keys.test.cjs",
+        "test/task-notice.test.cjs",
         "test/browser-bridge.test.cjs",
         "test/browser-extension.test.cjs"
       ],
