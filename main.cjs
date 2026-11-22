@@ -15,6 +15,10 @@ const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
 const { CRASH_WINDOW_MS, retryDelay, isServerFailure, retryTarget, recoveryView } = require('./desktop-recovery.cjs');
 const { installContextMenu } = require('./context-menu.cjs');
 const { taskTabCommand } = require('./task-tab-keys.cjs');
+const {
+  TASK_NOTICE_DEFAULT_HEIGHT, TASK_NOTICE_HIDE_MS, TASK_NOTICE_WIDTH,
+  createTaskNoticeController, normalizeTaskNotice, noticeBounds,
+} = require('./task-notice.cjs');
 const { installScreenCapture } = require('./screen-capture.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
@@ -37,6 +41,7 @@ const PALETTE = {
 const DASHBOARD_CSS = readFileSync(path.join(__dirname, 'dashboard.css'), 'utf8');
 const ACTIVITY_PAGE = path.join(__dirname, 'activity.html');
 const APPROVAL_PAGE = path.join(__dirname, 'approval.html');
+const TASK_NOTICE_PAGE = path.join(__dirname, 'task-notice.html');
 // The prompt takes no Run until it has been in front this long, and opens only after a pause in the
 // person's typing and clicking in the dashboard (or after the longest wait), so no key press or click
 // meant for something else can answer it.
@@ -65,6 +70,13 @@ let taskTitleBar = false;
 // Set by the Agents page while a task's tab strip is on screen: Ctrl/Cmd+T, Ctrl/Cmd+W and Ctrl+Tab then
 // drive its tabs. Off, every key does what it always did, so Ctrl/Cmd+W closes the window.
 let taskTabKeys = false;
+// Set by the loaded 1904 dashboard once it can switch tasks in-place without a full page reload.
+let taskNavigationReady = false;
+let taskNoticeWindow;
+let taskNoticeLoaded;
+let taskNoticeHideTimer;
+let taskNoticeHeight = TASK_NOTICE_DEFAULT_HEIGHT;
+let taskNoticeController;
 let signInPromptOpen = false;
 let signInAttempt;
 let queuedLink;
@@ -156,6 +168,7 @@ function startRecovery(kind, failedUrl) {
   if (!recovery) {
     setTaskTitleBar(false);
     taskTabKeys = false;
+    taskNavigationReady = false;
     dashboardTheme = undefined;
     syncTitleBar();
     dashboardView.setVisible(false);
@@ -186,8 +199,15 @@ function endRecovery() {
 function openTask(target) {
   const task = taskUrl(target, ORIGIN);
   if (!task) return;
-  loginReturnTo = task.pathname + task.search;
+  const relative = task.pathname + task.search;
+  loginReturnTo = relative;
+  const existingWindow = Boolean(mainWindow && !mainWindow.isDestroyed());
   showDashboard();
+  if (existingWindow && !recovery && taskNavigationReady &&
+      dashboardContents && !dashboardContents.isDestroyed() && is1904(dashboardContents.getURL())) {
+    dashboardContents.send('1904:open-task', relative);
+    return;
+  }
   loadPage(dashboardContents, task.href);
 }
 
@@ -431,11 +451,130 @@ function syncTitleBar() {
     if (process.platform !== 'darwin') approvalWindow.setTitleBarOverlay({ ...palette, height: 40 });
     approvalWindow.webContents.send('1904:approval-theme', theme);
   }
+  if (taskNoticeWindow && !taskNoticeWindow.isDestroyed()) {
+    taskNoticeWindow.webContents.send('1904:task-notice-theme', theme);
+  }
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.setBackgroundColor(palette.color);
   if (process.platform !== 'darwin') mainWindow.setTitleBarOverlay({ ...palette, height: CHROME_HEIGHT });
   mainWindow.webContents.send('1904:chrome-theme', theme);
   mainWindow.webContents.send('1904:chrome-task-title-bar', taskTitleBar);
+}
+
+// ── Windows bottom-right task notification drawer ─────────────────────────
+// Replaces native Windows toast notifications for task alerts so Close only
+// closes the popup, Open Task switches smoothly in-app, and alerts auto-dismiss.
+
+function isTaskNoticePage(url) {
+  try {
+    const file = fileURLToPath(url);
+    return process.platform === 'win32' ? file.toLowerCase() === TASK_NOTICE_PAGE.toLowerCase() : file === TASK_NOTICE_PAGE;
+  } catch {
+    return false;
+  }
+}
+
+function isTaskNoticeSender(event) {
+  return Boolean(taskNoticeWindow) && !taskNoticeWindow.isDestroyed() && event.sender === taskNoticeWindow.webContents &&
+    event.senderFrame === event.sender.mainFrame && isTaskNoticePage(event.senderFrame?.url);
+}
+
+function taskNoticeDisplay() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { return screen.getDisplayMatching(mainWindow.getBounds()); } catch { /* fall back to primary */ }
+  }
+  return screen.getPrimaryDisplay();
+}
+
+function positionTaskNoticeWindow(height = taskNoticeHeight) {
+  if (!taskNoticeWindow || taskNoticeWindow.isDestroyed()) return;
+  const bounds = noticeBounds(taskNoticeDisplay().workArea, TASK_NOTICE_WIDTH, height);
+  taskNoticeHeight = bounds.height;
+  taskNoticeWindow.setBounds(bounds, false);
+}
+
+function taskNoticeWindowNow() {
+  if (taskNoticeWindow && !taskNoticeWindow.isDestroyed()) return taskNoticeWindow;
+  const bounds = noticeBounds(taskNoticeDisplay().workArea, TASK_NOTICE_WIDTH, taskNoticeHeight);
+  const win = new BrowserWindow({
+    title: '1904 Notification',
+    ...bounds,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    focusable: false,
+    hasShadow: false,
+    show: false,
+    webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'task-notice-preload.cjs') },
+  });
+  win.setAlwaysOnTop(true, 'pop-up-menu');
+  taskNoticeWindow = win;
+  win.on('closed', () => {
+    if (taskNoticeWindow === win) {
+      taskNoticeWindow = undefined;
+      taskNoticeLoaded = undefined;
+    }
+  });
+  taskNoticeLoaded = win.loadFile(TASK_NOTICE_PAGE).then(() => true, () => false);
+  return win;
+}
+
+function closeTaskNoticeWindow() {
+  clearTimeout(taskNoticeHideTimer);
+  taskNoticeHideTimer = undefined;
+  taskNoticeController?.dispose();
+  taskNoticeController = undefined;
+  if (taskNoticeWindow && !taskNoticeWindow.isDestroyed()) taskNoticeWindow.destroy();
+  taskNoticeWindow = undefined;
+  taskNoticeLoaded = undefined;
+}
+
+function ensureTaskNoticeController() {
+  taskNoticeController ??= createTaskNoticeController({
+    createNonce: () => randomUUID(),
+    onShow: payload => {
+      void (async () => {
+        clearTimeout(taskNoticeHideTimer);
+        taskNoticeHideTimer = undefined;
+        const win = taskNoticeWindowNow();
+        if (!(await taskNoticeLoaded) || win.isDestroyed()) return;
+        if (taskNoticeController?.active()?.nonce !== payload.nonce) return;
+        positionTaskNoticeWindow(taskNoticeHeight);
+        win.webContents.send('1904:task-notice-show', {
+          ...payload,
+          theme: activeTheme(),
+          icon: approvalIcon(),
+        });
+        win.showInactive();
+      })().catch(() => {});
+    },
+    onHide: payload => {
+      clearTimeout(taskNoticeHideTimer);
+      taskNoticeHideTimer = undefined;
+      if (!taskNoticeWindow || taskNoticeWindow.isDestroyed()) return;
+      taskNoticeWindow.webContents.send('1904:task-notice-hide', payload);
+      const win = taskNoticeWindow;
+      taskNoticeHideTimer = setTimeout(() => {
+        taskNoticeHideTimer = undefined;
+        if (!win.isDestroyed() && !taskNoticeController?.active()) win.hide();
+      }, TASK_NOTICE_HIDE_MS);
+    },
+    onTimer: payload => {
+      if (taskNoticeWindow && !taskNoticeWindow.isDestroyed()) {
+        taskNoticeWindow.webContents.send('1904:task-notice-timer', payload);
+      }
+    },
+    onOpen: notice => {
+      openTask(notice.href);
+    },
+  });
+  return taskNoticeController;
 }
 
 function isTaskTitleBarPage(href) {
@@ -491,24 +630,45 @@ function installChromeHandlers() {
     if (!taskTitleBar || !isTaskTitleBarSender(event)) return;
     Menu.getApplicationMenu()?.popup({ window: mainWindow, x: process.platform === 'darwin' ? 82 : 12, y: CHROME_HEIGHT });
   });
+  ipcMain.on('1904:task-navigation-ready', (event, ready) => {
+    if (event.sender === dashboardContents && event.senderFrame === event.sender.mainFrame &&
+        is1904(event.senderFrame?.url) && typeof ready === 'boolean') {
+      taskNavigationReady = ready;
+    }
+  });
+  ipcMain.on('1904:task-notice-action', (event, payload) => {
+    if (!isTaskNoticeSender(event)) return;
+    taskNoticeController?.act(payload?.nonce, payload?.action);
+  });
+  ipcMain.on('1904:task-notice-hover', (event, payload) => {
+    if (!isTaskNoticeSender(event)) return;
+    taskNoticeController?.setHovered(payload?.nonce, payload?.hovered);
+  });
+  ipcMain.on('1904:task-notice-size', (event, height) => {
+    if (!isTaskNoticeSender(event) || !Number.isFinite(height)) return;
+    positionTaskNoticeWindow(height);
+  });
   ipcMain.handle('1904:task-notification', (event, item) => {
     if (event.sender !== dashboardContents || event.senderFrame !== event.sender.mainFrame ||
-        !is1904(event.senderFrame?.url) || !Notification.isSupported()) return false;
-    const target = taskUrl(item?.href, ORIGIN);
-    if (!target || typeof item?.id !== 'string' || !/^[a-z0-9:_-]{1,128}$/i.test(item.id) ||
-        !['task_needs_you', 'task_ready'].includes(item.kind)) return false;
-    if (notified.has(item.id)) return true;
-    notified.add(item.id);
+        !is1904(event.senderFrame?.url)) return false;
+    const normalized = normalizeTaskNotice(item, ORIGIN);
+    if (!normalized) return false;
+    if (process.platform === 'win32') {
+      return ensureTaskNoticeController().enqueue(normalized);
+    }
+    if (!Notification.isSupported()) return false;
+    if (notified.has(normalized.id)) return true;
+    notified.add(normalized.id);
     if (notified.size > 1024) notified.delete(notified.values().next().value);
     const notice = new Notification({
-      title: item.kind === 'task_needs_you' ? 'A task needs your input' : 'A task is ready for review',
-      body: 'Open 1904 Desktop to view the task.',
-      timeoutType: item.kind === 'task_needs_you' ? 'never' : 'default',
+      title: normalized.title,
+      body: normalized.body,
+      timeoutType: 'default',
     });
-    notices.set(item.id, notice);
-    notice.once('click', () => openTask(target.href));
-    notice.once('close', () => notices.delete(item.id));
-    notice.once('failed', () => { notices.delete(item.id); console.warn('1904 Desktop could not display a task notification.'); });
+    notices.set(normalized.id, notice);
+    notice.once('click', () => openTask(normalized.href));
+    notice.once('close', () => notices.delete(normalized.id));
+    notice.once('failed', () => { notices.delete(normalized.id); console.warn('1904 Desktop could not display a task notification.'); });
     notice.show();
     return true;
   });
@@ -576,6 +736,8 @@ function createWindow() {
       dashboardTheme = undefined;
       taskTitleBar = false;
       taskTabKeys = false;
+      taskNavigationReady = false;
+      closeTaskNoticeWindow();
       clearTimeout(recovery?.timer);
       recovery = undefined;
     }
@@ -586,6 +748,7 @@ function createWindow() {
   contents.on('did-navigate', (_event, url, httpResponseCode) => {
     setTaskTitleBar(false);
     taskTabKeys = false;
+    taskNavigationReady = false;
     if (!is1904(url)) return;
     // Not emitted for Chromium's own error pages, so this is always a real answer from 1904.
     if (isServerFailure(httpResponseCode) && url !== challengeUrl) startRecovery('unavailable', url);
@@ -1348,6 +1511,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
   // Commands still running on this computer are stopped, and 1904 told, before the app goes.
   app.on('before-quit', (event) => {
+    closeTaskNoticeWindow();
     if (computerQuitting || !computerBridge?.busy()) return;
     event.preventDefault();
     computerQuitting = true;
