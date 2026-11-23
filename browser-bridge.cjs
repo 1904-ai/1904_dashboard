@@ -17,7 +17,7 @@ function taskPath(appId, taskId) {
 /** The renderer supplies IDs, never operations. Read the actual owner-only request from 1904. */
 function createDesktopBrowserBridge({file,fetch,origin,confirm,now=Date.now,serverFactory=createServer}) {
   let setting=preference(readState(file).preference),server,port,extensionOrigin,shared,lease,pending;
-  let lastSeen=0,paused=false,releaseRequested=false;
+  let lastSeen=0,paused=false,releaseRequested=false,reshare=false;
   const token=randomBytes(32).toString('hex');
   const executed=new Map(),inFlight=new Set();
   function available() { return Boolean(shared&&now()-lastSeen<15_000); }
@@ -44,15 +44,16 @@ function createDesktopBrowserBridge({file,fetch,origin,confirm,now=Date.now,serv
         const body=await readBody(req);extensionOrigin=requestOrigin;lastSeen=now();
         let answer={};
         if(req.url==='/share'){
-          end();shared={browser:body.browser==='Edge'?'Edge':'Chrome',origin:publicOrigin(body.url)};releaseRequested=false;
+          end();shared={browser:body.browser==='Edge'?'Edge':'Chrome',origin:publicOrigin(body.url)};releaseRequested=false;reshare=false;
         } else if(req.url==='/poll') {
-          answer={request:pending&&!pending.sent?{id:pending.id,operation:pending.operation,payload:pending.payload,expiresAt:pending.expiresAt}:undefined,release:releaseRequested};
-          if(pending)pending.sent=true;releaseRequested=false;
+          // After sleep the extension is still paired: it shares the same tab again; each task still asks before using it.
+          answer={request:pending&&!pending.sent?{id:pending.id,operation:pending.operation,payload:pending.payload,expiresAt:pending.expiresAt}:undefined,release:releaseRequested,...(reshare&&!paused?{reshare:true}:{})};
+          if(pending)pending.sent=true;releaseRequested=false;if(!paused)reshare=false;
         } else if(req.url==='/result') {
           if(!pending||body.id!==pending.id)throw new Error('Request expired.');
           const job=pending;pending=undefined;clearTimeout(job.timer);
           if(body.ok===true)job.resolve(body.value);else job.reject(new Error('Browser operation failed. Inspect the page before retrying.'));
-        } else if(req.url==='/disconnect')end();else {res.writeHead(404);res.end();return;}
+        } else if(req.url==='/disconnect'){reshare=false;end();}else {res.writeHead(404);res.end();return;}
         res.setHeader('Content-Type','application/json');res.end(JSON.stringify(answer));
       })().catch(()=>{if(!res.headersSent)res.writeHead(400);res.end('{}');});
     });
@@ -113,7 +114,7 @@ function createDesktopBrowserBridge({file,fetch,origin,confirm,now=Date.now,serv
     setPreference(value){if(!PREFERENCES.has(value))throw new Error('Choose a browser preference.');writeFileSync(file+'.tmp',JSON.stringify({preference:value}),{mode:0o600});renameSync(file+'.tmp',file);setting=value;return state();},
     async setup(){await start();return `http://127.0.0.1:${port}/#${token}`;},
     release(input){if(lease&&lease.scope===input.appId+':'+input.taskId+':'+input.session)end();},
-    pause(){paused=true;end();},resume(){paused=false;},
+    pause(){paused=true;if(shared)reshare=true;end();},resume(){paused=false;},
     close(){end();server?.close();server=undefined;},
   };
 }

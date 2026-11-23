@@ -55,3 +55,12 @@ test('extension manifest limits host access to the loopback connector',()=>{
   assert.ok(!manifest.permissions.includes('cookies'));
   assert.ok(!manifest.externally_connectable);
 });
+test('extension shares its tab again when Desktop asks after sleep',async()=>{
+  const f=fixture();const posts=[];let polls=0;
+  f.context.fetch=async(url,init)=>{const path=new URL(url).pathname;posts.push(path);
+    if(path==='/poll'){polls++;if(polls===1)return Response.json({release:true,reshare:true});throw new Error('Desktop closed');}
+    return Response.json({});};
+  await f.run('loop()');
+  assert.deepEqual(posts.slice(0,2),['/poll','/share']);
+  assert.ok(f.calls.some(call=>call.method==='Page.enable'),'the tab is attached again before sharing');
+});
