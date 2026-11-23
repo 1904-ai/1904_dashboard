@@ -110,8 +110,10 @@ async function loop(){
   try{while(connection&&mine===generation){
     try{
       await chrome.storage.session.get('connection'); // Extension activity keeps the connection alive while shared.
-      const {request,release}=await post('/poll',{});if(mine!==generation)break;
+      const {request,release,reshare}=await post('/poll',{});if(mine!==generation)break;
       if(release)await detach();
+      // Desktop ended sharing while the computer slept: share the same tab again (guard stops if it changed websites).
+      if(reshare){await attach();const tab=await chrome.tabs.get(tabId);await post('/share',{url:tab.url,browser:navigator.userAgent.includes('Edg/')?'Edge':'Chrome'});}
       if(request){let result;executing=true;try{result={ok:true,value:await execute(request)};}catch{result={ok:false};}finally{executing=false;}if(mine===generation&&connection)await post('/result',{id:request.id,...result});}
     }catch{if(mine===generation)await stop();break;}
     await sleep(500);

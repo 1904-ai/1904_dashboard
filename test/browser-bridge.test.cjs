@@ -72,3 +72,18 @@ test('declining a task never releases its request to the extension',async()=>{
     assert.equal(f.delivered[0].result.ok,false);
   }finally{f.close();}
 });
+test('after sleep the paired extension is asked once to share its tab again',async()=>{
+  const f=fixture();try{
+    const {post}=await connection(f);
+    await post('/share',{url:'https://example.com/account',browser:'Chrome'});
+    f.bridge.pause();assert.equal(f.bridge.state().available,false);
+    assert.equal((await (await post('/poll')).json()).reshare,undefined,'never while asleep');
+    f.bridge.resume();
+    assert.equal((await (await post('/poll')).json()).reshare,true);
+    assert.equal((await (await post('/poll')).json()).reshare,undefined,'asked once');
+    f.bridge.pause();f.bridge.resume();await post('/share',{url:'https://example.com/account',browser:'Chrome'});
+    assert.equal(f.bridge.state().available,true);assert.equal((await (await post('/poll')).json()).reshare,undefined,'a share answers it');
+    f.bridge.pause();f.bridge.resume();await post('/disconnect');
+    assert.equal((await (await post('/poll')).json()).reshare,undefined,'stopping sharing is final');
+  }finally{f.close();}
+});

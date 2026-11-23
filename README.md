@@ -125,7 +125,10 @@ action approvals and private control still apply.
 
 This first connector shares one public-site tab at a time and stays on its
 origin. Complete cross-origin sign-in before sharing. Reconnect after quitting
-Desktop or restarting the browser. Safari and Firefox are not supported.
+Desktop or restarting the browser; after your computer sleeps, the extension
+shares the same tab again by itself. If a task needs your browser while it is
+not connected, the dashboard shows **Connect browser** next to the task tabs.
+Safari and Firefox are not supported.
 **Change browser → Use cloud browser** offers an explicit fallback; cloud may
 need a separate sign-in. Keep the task open in Desktop to service local browser
 requests. Older dashboards and runtimes keep their existing cloud behaviour.
