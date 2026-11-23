@@ -49,11 +49,13 @@ function readLink(value, origin) {
   }
 }
 
-function startSignIn(origin) {
+function startSignIn(origin, { addAccount = false } = {}) {
   const state = token(), verifier = token();
   const challenge = createHash('sha256').update(verifier).digest('hex');
   const url = new URL('/desktop/sign-in', origin);
-  url.search = new URLSearchParams({ state, challenge }).toString();
+  const params = new URLSearchParams({ state, challenge });
+  if (addAccount) params.set('addAccount', '1');
+  url.search = params.toString();
   return { state, verifier, url: url.href, expiresAt: Date.now() + 15 * 60_000 };
 }
 

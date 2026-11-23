@@ -32,8 +32,17 @@
     @keyframes signal { 50% { opacity: .25; } }
     #computer-activity[hidden] { display: none; }
     #computer-activity .signal { background: #4fb477; animation: signal 1.6s ease-in-out infinite; }
+    #account-switcher { margin-left: auto; width: auto; height: 26px; display: inline-flex; align-items: center; gap: 6px;
+      padding: 0 8px 0 4px; border: 1px solid var(--line); border-radius: 999px; font: 500 12px system-ui, sans-serif; max-width: 220px; }
+    #account-switcher[hidden] { display: none; }
+    #account-switcher .acct-avatar { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center;
+      font-size: 9px; font-weight: 700; letter-spacing: .02em; background: #2c4a6e; color: #e2e7ec; flex: none; }
+    :root[data-theme="light"] #account-switcher .acct-avatar { background: #dce8f3; color: #274766; }
+    #account-switcher .acct-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #account-switcher .acct-count { font-size: 10px; opacity: .65; flex: none; }
+    #account-switcher .acct-caret { opacity: .65; flex: none; }
     @media (prefers-reduced-motion: reduce) { [data-trying] .signal, #computer-activity .signal { animation: none; } }
-    @media (forced-colors: active) { header { border-color: CanvasText; } .signal, #computer-activity .signal { background: CanvasText; } }
+    @media (forced-colors: active) { header { border-color: CanvasText; } .signal, #computer-activity .signal { background: CanvasText; } #account-switcher { border-color: CanvasText; } }
   </style>
 </head>
 <body>
@@ -49,6 +58,15 @@
     <button type="button" id="computer-activity" hidden aria-label="A command is running on this computer. Open Computer Activity."
       title="A command is running on this computer. Open Computer Activity.">
       <span class="signal" aria-hidden="true"></span>
+    </button>
+    <!-- Quick account switcher when the native title bar is visible (including on /login when adding an account). -->
+    <button type="button" id="account-switcher" hidden aria-label="Switch 1904 account" title="Switch or add a 1904 account" aria-haspopup="menu">
+      <span class="acct-avatar" id="account-avatar" aria-hidden="true">19</span>
+      <span class="acct-label" id="account-label">Account</span>
+      <span class="acct-count" id="account-count" hidden></span>
+      <svg class="acct-caret" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 4.5 6 7.5l3-3"/>
+      </svg>
     </button>
   </header>
   <!-- Shown while the dashboard cannot be loaded; the dashboard view is hidden and retried behind it. -->
