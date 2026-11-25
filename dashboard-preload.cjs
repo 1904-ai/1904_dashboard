@@ -67,6 +67,9 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
       }),
       showActivity: () => ipcRenderer.send('1904:computer-activity'),
     },
+    // Non-sensitive OS and hardware model only, read by the dashboard only when the person enabled
+    // opt-in product usage tracking in Settings → General.
+    deviceInfo: () => ipcRenderer.invoke('1904:device-info'),
   });
   ipcRenderer.on('1904:resume', () => window.dispatchEvent(new Event('shipt:retry-connection')));
   ipcRenderer.on('1904:task-title-bar-replay', () => {
