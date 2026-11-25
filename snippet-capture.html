@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>Take a snippet</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --canvas: #121416; --surface: #1b1e21; --hover: #29313a; --border: #363c42;
+    --text: #f4f5f6; --muted: #c1c8cf; --accent: #a9c7e8; --ink: #0e1b2a;
+    --gap: 8px; --padding: 16px; --radius: 8px; --target: 44px;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --canvas: #f6f8fa; --surface: #fff; --hover: #edf3f8; --border: #dce4ec;
+    --text: #17212c; --muted: #56636f; --accent: #456086; --ink: #fff;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+    background: var(--canvas); color: var(--text); font: 14px/1.4 system-ui, sans-serif;
+  }
+  header, footer {
+    display: flex; align-items: center; gap: var(--gap); padding: var(--gap) var(--padding);
+    background: var(--surface); flex-wrap: wrap;
+  }
+  header { border-bottom: 1px solid var(--border); }
+  footer { border-top: 1px solid var(--border); }
+  h1, p { margin: 0; }
+  h1 { font-size: 16px; margin-right: auto; }
+  footer p { margin-right: auto; }
+  #status, footer p { color: var(--muted); }
+  button, select {
+    color: inherit; font: inherit; min-height: var(--target); padding: 0 var(--padding);
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+  }
+  button { cursor: pointer; }
+  button:hover:not(:disabled), button[aria-pressed="true"] { background: var(--hover); }
+  button:disabled { opacity: .5; cursor: default; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+  #attach:not(:disabled) { background: var(--accent); color: var(--ink); font-weight: 600; }
+  #stage { display: grid; place-items: center; min-height: 0; overflow: hidden; }
+  #surface { position: relative; overflow: hidden; cursor: crosshair; touch-action: none; }
+  #source { display: block; width: 100%; height: 100%; user-select: none; pointer-events: none; }
+  #selection {
+    position: absolute; pointer-events: none; border: 2px solid #a9c7e8;
+    outline: 1px solid #fff; box-shadow: 0 0 0 100vmax #0b101799;
+  }
+  #dimensions {
+    position: absolute; top: 4px; left: 4px; padding: 2px 6px; border-radius: 4px;
+    background: #0e1b2a; color: #fff; white-space: nowrap; font: 12px/1.5 monospace;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Take a snippet</h1>
+  <button id="area" type="button" aria-pressed="true">Area</button>
+  <button id="window" type="button" aria-pressed="false">Window</button>
+  <select id="displays" aria-label="Choose a display"></select>
+  <select id="windows" aria-label="Choose a window" hidden></select>
+  <button id="cancel" type="button">Cancel</button>
+</header>
+<main id="stage">
+  <div id="surface" tabindex="0" role="group" aria-label="Snippet selection" aria-describedby="help">
+    <img id="source" alt="Capture source" draggable="false">
+    <div id="selection" hidden><span id="dimensions" aria-hidden="true"></span></div>
+  </div>
+</main>
+<footer>
+  <p id="help">Drag to select. Arrow keys move the selection. Shift + arrows resize it.</p>
+  <span id="status" role="status">Loading capture…</span>
+  <button id="reset" type="button" disabled>Reselect</button>
+  <button id="attach" type="button" disabled>Attach snippet</button>
+</footer>
+<script>
+  'use strict';
+  const element = id => document.getElementById(id);
+  const api = window.snippetOverlay;
+  const stage = element('stage'), surface = element('surface'), source = element('source');
+  const area = element('area'), windowMode = element('window'), displays = element('displays'), windows = element('windows');
+  const status = element('status'), selection = element('selection'), dimensions = element('dimensions');
+  const attach = element('attach'), reset = element('reset');
+  const arrows = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
+  let frame, rect, start, pointer;
+  let mode = 'area', busy = false, windowReady = false;
+
+  function updateControls() {
+    selection.hidden = !rect;
+    attach.disabled = busy || !rect;
+    reset.disabled = busy || !rect;
+    area.disabled = displays.disabled = windowMode.disabled = windows.disabled = busy;
+    area.setAttribute('aria-pressed', String(mode === 'area'));
+    windowMode.setAttribute('aria-pressed', String(mode === 'window'));
+    windows.hidden = mode !== 'window';
+    displays.hidden = mode !== 'area';
+    element('help').textContent = mode === 'area'
+      ? 'Drag to select. Arrow keys move the selection. Shift + arrows resize it.'
+      : 'Choose a window. Drag to crop it, or attach the whole window.';
+    if (!rect) return;
+    selection.style.left = rect.x / frame.width * 100 + '%';
+    selection.style.top = rect.y / frame.height * 100 + '%';
+    selection.style.width = rect.width / frame.width * 100 + '%';
+    selection.style.height = rect.height / frame.height * 100 + '%';
+    dimensions.textContent = rect.width + ' × ' + rect.height + ' px';
+  }
+
+  function fitImage() {
+    if (!frame) return;
+    const scale = Math.min(stage.clientWidth / frame.width, stage.clientHeight / frame.height);
+    surface.style.width = frame.width * scale + 'px';
+    surface.style.height = frame.height * scale + 'px';
+  }
+
+  async function useFrame(next, fullWindow = false) {
+    rect = undefined;
+    updateControls();
+    source.src = next.image;
+    await source.decode();
+    frame = next;
+    windowReady = fullWindow;
+    document.documentElement.dataset.theme = next.theme;
+    displays.replaceChildren(...next.displays.map((title, index) => new Option(title, index)));
+    displays.selectedIndex = next.displayIndex;
+    rect = fullWindow ? { x: 0, y: 0, width: frame.width, height: frame.height } : undefined;
+    status.textContent = fullWindow ? 'Window selected.' : 'Select an area to attach.';
+    fitImage();
+    updateControls();
+    surface.focus();
+  }
+
+  async function run(action) {
+    if (busy) return;
+    busy = true;
+    updateControls();
+    try {
+      await action();
+    } catch {
+      status.textContent = 'Could not read that source. Choose another source or cancel.';
+    } finally {
+      busy = false;
+      updateControls();
+    }
+  }
+
+  async function changeDisplay(index) {
+    await run(async () => {
+      status.textContent = 'Loading display…';
+      const next = await api.displays(index);
+      if (!next?.image) throw new Error();
+      mode = 'area';
+      await useFrame(next);
+    });
+  }
+
+  displays.onchange = () => void changeDisplay(displays.selectedIndex);
+  area.onclick = () => { if (mode !== 'area') void changeDisplay(frame.displayIndex); };
+  windowMode.onclick = () => void run(async () => {
+    if (mode === 'window') return;
+    status.textContent = 'Finding windows…';
+    const names = await api.windows();
+    if (!names?.length) {
+      status.textContent = 'No windows are available. Select an area from a display.';
+      return;
+    }
+    mode = 'window';
+    windowReady = false;
+    rect = undefined;
+    windows.replaceChildren(
+      new Option('Choose a window', ''),
+      ...names.map((name, index) => new Option(name || 'Untitled window', index))
+    );
+    windows.options[0].disabled = true;
+    windows.selectedIndex = 0;
+    status.textContent = 'Choose a window to capture.';
+    windows.hidden = false;
+    windows.disabled = false;
+    windows.focus();
+  });
+
+  windows.onchange = () => void run(async () => {
+    windowReady = false;
+    rect = undefined;
+    updateControls();
+    status.textContent = 'Loading window…';
+    const next = await api.window(Number(windows.value));
+    if (!next?.image) {
+      windows.selectedIndex = 0;
+      status.textContent = next?.error || 'That window is unavailable. Choose another window.';
+      return;
+    }
+    await useFrame(next, true);
+  });
+
+  const clamp = (value, max) => Math.min(max, Math.max(0, value));
+  function point(event) {
+    const bounds = surface.getBoundingClientRect();
+    return {
+      x: Math.round(clamp((event.clientX - bounds.left) / bounds.width, 1) * frame.width),
+      y: Math.round(clamp((event.clientY - bounds.top) / bounds.height, 1) * frame.height),
+    };
+  }
+
+  function dragTo(event) {
+    const end = point(event);
+    const width = Math.abs(start.x - end.x), height = Math.abs(start.y - end.y);
+    rect = width >= 2 && height >= 2
+      ? { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width, height }
+      : undefined;
+    updateControls();
+  }
+
+  surface.onpointerdown = event => {
+    if (busy || !frame || (mode === 'window' && !windowReady) || event.button !== 0 || pointer !== undefined) return;
+    surface.focus();
+    pointer = event.pointerId;
+    surface.setPointerCapture(pointer);
+    start = point(event);
+    rect = undefined;
+    updateControls();
+  };
+  surface.onpointermove = event => { if (event.pointerId === pointer) dragTo(event); };
+  surface.onpointerup = event => {
+    if (event.pointerId !== pointer) return;
+    dragTo(event);
+    pointer = undefined;
+    status.textContent = rect ? dimensions.textContent + ' selected.' : 'Select an area to attach.';
+  };
+  surface.onpointercancel = () => {
+    pointer = rect = undefined;
+    status.textContent = 'Select an area to attach.';
+    updateControls();
+  };
+  surface.onkeydown = event => {
+    if (!frame || busy) return;
+    if (event.key === 'Enter' && rect) { event.preventDefault(); attach.click(); return; }
+    if ((mode === 'window' && !windowReady) || !arrows.includes(event.key)) return;
+    event.preventDefault();
+    const dx = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+    const dy = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
+    rect ??= {
+      x: Math.floor(frame.width / 4), y: Math.floor(frame.height / 4),
+      width: Math.floor(frame.width / 2), height: Math.floor(frame.height / 2),
+    };
+    if (event.shiftKey) {
+      rect.width = Math.max(2, clamp(rect.width + dx * 8, frame.width - rect.x));
+      rect.height = Math.max(2, clamp(rect.height + dy * 8, frame.height - rect.y));
+    } else {
+      rect.x = clamp(rect.x + dx * 8, frame.width - rect.width);
+      rect.y = clamp(rect.y + dy * 8, frame.height - rect.height);
+    }
+    updateControls();
+    status.textContent = dimensions.textContent + ' selected.';
+  };
+
+  reset.onclick = () => {
+    rect = undefined;
+    status.textContent = 'Select an area to attach.';
+    updateControls();
+    surface.focus();
+  };
+  attach.onclick = () => void run(async () => {
+    if (!rect) return;
+    const answer = await api.attach(frame.revision, rect);
+    if (answer?.error) status.textContent = answer.error;
+  });
+  element('cancel').onclick = () => void api.cancel();
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !event.defaultPrevented) void api.cancel();
+  });
+  new ResizeObserver(fitImage).observe(stage);
+  void run(async () => {
+    const next = await api.initial();
+    if (!next?.image) throw new Error();
+    await useFrame(next);
+  }).then(() => surface.focus());
+</script>
+</body>
+</html>

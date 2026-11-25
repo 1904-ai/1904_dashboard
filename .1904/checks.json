@@ -17,7 +17,7 @@
     },
     {
       "name": "desktop-screen-capture",
-      "command": ["node", "--test", "test/screen-capture.test.cjs"],
+      "command": ["node", "--test", "test/screen-capture.test.cjs", "test/snippet-capture.test.cjs"],
       "automatic": true
     }
   ]

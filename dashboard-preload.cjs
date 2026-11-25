@@ -14,6 +14,11 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
     ipcRenderer.send('1904:task-navigation-ready', openTaskListeners.size > 0);
   };
   contextBridge.exposeInMainWorld('desktop1904', {
+    snippet: {
+      capture: requestId => navigator.userActivation.isActive
+        ? ipcRenderer.invoke('1904:snippet-start', requestId) : Promise.resolve(null),
+      cancel: requestId => ipcRenderer.send('1904:snippet-cancel', requestId),
+    },
     notifyTask: item => ipcRenderer.invoke('1904:task-notification', item),
     onOpenTask: listener => {
       if (typeof listener !== 'function') return () => {};
