@@ -9,6 +9,7 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
   const TAB_COMMANDS = ['new', 'close', 'next', 'previous'];
   const tabCommandListeners = new Set();
   const openTaskListeners = new Set();
+  const accountsListeners = new Set();
   const syncOpenTaskReady = () => {
     ipcRenderer.send('1904:task-navigation-ready', openTaskListeners.size > 0);
   };
@@ -23,6 +24,25 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
         openTaskListeners.delete(entry);
         syncOpenTaskReady();
       };
+    },
+    // Multi-account switching: each account lives in its own isolated Electron partition.
+    // The page can read account display info, report the signed-in profile, and ask Desktop
+    // to add, switch, or remove accounts (gated by real user input in main.cjs).
+    accounts: {
+      state: () => ipcRenderer.invoke('1904:accounts-state'),
+      sync: profile => ipcRenderer.invoke('1904:accounts-sync', {
+        userId: profile?.userId, email: profile?.email, name: profile?.name, workspaceName: profile?.workspaceName,
+      }),
+      markSignedOut: () => ipcRenderer.send('1904:accounts-signed-out'),
+      switch: id => ipcRenderer.invoke('1904:accounts-switch', id),
+      add: () => ipcRenderer.invoke('1904:accounts-add'),
+      remove: id => ipcRenderer.invoke('1904:accounts-remove', id),
+      onChange: listener => {
+        if (typeof listener !== 'function') return () => {};
+        const entry = { listener };
+        accountsListeners.add(entry);
+        return () => { accountsListeners.delete(entry); };
+      },
     },
     taskTitleBar: {
       platform: process.platform === 'darwin' ? 'macos' : 'windows',
@@ -91,6 +111,16 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
     for (const { listener } of [...openTaskListeners]) {
       try {
         listener(targetPath);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+  });
+  ipcRenderer.on('1904:accounts-changed', (_event, state) => {
+    if (!state || typeof state !== 'object') return;
+    for (const { listener } of [...accountsListeners]) {
+      try {
+        listener(state);
       } catch (error) {
         console.error(error);
       }

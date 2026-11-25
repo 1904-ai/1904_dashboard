@@ -12,6 +12,10 @@ const { fileURLToPath } = require('node:url');
 const { startUpdater } = require('./updater.cjs');
 const { SCHEME, IMPORT_PATH, taskUrl, repositorySetupUrl, readLink, startSignIn } = require('./desktop-links.cjs');
 const { readState, saveState, windowOptions } = require('./desktop-state.cjs');
+const {
+  ACCOUNTS_FILE, DEFAULT_PARTITION, MAX_ACCOUNTS,
+  accountLabel, createAccountStore, isAccountId, isEmptyPending,
+} = require('./desktop-accounts.cjs');
 const { CRASH_WINDOW_MS, retryDelay, isServerFailure, retryTarget, recoveryView } = require('./desktop-recovery.cjs');
 const { installContextMenu } = require('./context-menu.cjs');
 const { taskTabCommand } = require('./task-tab-keys.cjs');
@@ -33,7 +37,7 @@ const { createActivityLog } = require('./computer-log.cjs');
 
 const ORIGIN = 'https://1904.ai';
 const AGENTS = `${ORIGIN}/agents`;
-const PARTITION = 'persist:1904-agents';
+const PARTITION = DEFAULT_PARTITION;
 const ICON = path.join(__dirname, 'assets', 'icon.png');
 const CHROME_HEIGHT = 44;
 const PALETTE = {
@@ -68,6 +72,9 @@ let mainWindow;
 let dashboardView;
 let dashboardContents;
 let dashboardTheme;
+let accountStore;
+const configuredPartitions = new Set();
+const partitionByContents = new WeakMap();
 let taskTitleBar = false;
 // Set by the Agents page while a task's tab strip is on screen: Ctrl/Cmd+T, Ctrl/Cmd+W and Ctrl+Tab then
 // drive its tabs. Off, every key does what it always did, so Ctrl/Cmd+W closes the window.
@@ -219,8 +226,26 @@ function openRepositoryImport() {
   loadPage(dashboardContents, ORIGIN + IMPORT_PATH);
 }
 
+function activePartition() {
+  return accountStore ? accountStore.active().partition : PARTITION;
+}
+
+function windowPreferencesFor(partition = activePartition()) {
+  return { ...SAFE_PREFERENCES, partition };
+}
+
+function clearPartitions(partitions) {
+  for (const partition of partitions || []) {
+    try {
+      void session.fromPartition(partition).clearStorageData().catch(() => {});
+    } catch { /* ignore invalid partition */ }
+  }
+}
+
 function beginBrowserSignIn() {
-  signInAttempt = { ...startSignIn(ORIGIN), returnTo: loginReturnTo };
+  const accounts = accountStore?.snapshot().accounts ?? [];
+  const addAccount = accounts.length > 1 || isEmptyPending(accountStore?.active());
+  signInAttempt = { ...startSignIn(ORIGIN, { addAccount }), returnTo: loginReturnTo, accountId: accountStore?.active().id };
   openBrowser(signInAttempt.url);
 }
 
@@ -242,6 +267,10 @@ function handleLink(link) {
   if (!attempt || attempt.state !== link.state || attempt.expiresAt <= Date.now()) return false;
   signInAttempt = undefined;
   showDashboard();
+  // Always exchange inside the exact account slot that initiated browser sign-in.
+  if (attempt.accountId && accountStore && accountStore.active().id !== attempt.accountId && accountStore.get(attempt.accountId)) {
+    switchAccount(attempt.accountId, { load: false });
+  }
   // A pending retry must not navigate away from the sign-in exchange.
   clearTimeout(recovery?.timer);
   const data = new URLSearchParams({ code: link.code, state: link.state, verifier: attempt.verifier, returnTo: attempt.returnTo });
@@ -328,9 +357,10 @@ function installNavigationRules(contents) {
   });
   contents.setWindowOpenHandler(({ url }) => {
     if (is1904(url)) {
+      const partition = partitionByContents.get(contents) || activePartition();
       return {
         action: 'allow',
-        overrideBrowserWindowOptions: { autoHideMenuBar: true, icon: ICON, webPreferences: WINDOW_PREFERENCES },
+        overrideBrowserWindowOptions: { autoHideMenuBar: true, icon: ICON, webPreferences: windowPreferencesFor(partition) },
       };
     }
     const target = webUrl(url);
@@ -355,7 +385,10 @@ function fromDashboard(details) {
 // A message the person sends from this window gets a proof only this process can make. The proof
 // covers the exact bytes sent; the header is added in onBeforeSendHeaders, after the page let go.
 async function stampMessage(profile, details) {
-  if (!computerLink?.info() || !computerProof.stampableRequest({ method: details.method, url: details.url, origin: ORIGIN }) || !fromDashboard(details)) return;
+  const linkInfo = computerLink?.info();
+  if (!linkInfo || !computerProof.stampableRequest({ method: details.method, url: details.url, origin: ORIGIN }) || !fromDashboard(details)) return;
+  const activeEmail = accountStore?.active().email;
+  if (linkInfo.account && activeEmail && linkInfo.account.toLowerCase() !== activeEmail.toLowerCase()) return;
   try {
     const body = await computerProof.uploadBody(details.uploadData, id => profile.getBlobData(id));
     const inBody = body && computerProof.messageInBody(body);
@@ -378,8 +411,10 @@ async function stampMessage(profile, details) {
   }
 }
 
-function installPermissionRules() {
-  const profile = session.fromPartition(PARTITION);
+function installPermissionRules(partition = activePartition()) {
+  if (configuredPartitions.has(partition)) return;
+  configuredPartitions.add(partition);
+  const profile = session.fromPartition(partition);
   // One listener per event and session: the sign-in redirect and the message proof share it.
   profile.webRequest.onBeforeRequest({ urls: [`${ORIGIN}/login*`, `${ORIGIN}/api/apps/*`] }, (details, callback) => {
     const url = new URL(details.url);
@@ -683,29 +718,41 @@ function installChromeHandlers() {
   });
 }
 
-function createWindow() {
-  const mac = process.platform === 'darwin';
+function mountDashboardView(win, initialUrl) {
+  if (!win || win.isDestroyed()) return null;
+  const previousView = dashboardView;
+  const previousContents = dashboardContents;
+  if (previousView) {
+    setTaskTitleBar(false);
+    taskTabKeys = false;
+    taskNavigationReady = false;
+    dashboardTheme = undefined;
+    challengeUrl = undefined;
+    clearTimeout(recovery?.timer);
+    recovery = undefined;
+    sendRecovery();
+    computerInput.reset();
+    closeTaskNoticeWindow();
+    for (const notice of notices.values()) { try { notice.close(); } catch { /* ignore */ } }
+    notices.clear();
+    notified.clear();
+    desktopBrowserBridge?.resetLease();
+    try { win.contentView.removeChildView(previousView); } catch { /* ignore */ }
+    if (previousContents && !previousContents.isDestroyed()) {
+      previousContents.removeAllListeners();
+      previousContents.close();
+    }
+  }
+  const partition = activePartition();
+  installPermissionRules(partition);
   const palette = PALETTE[activeTheme()];
-  const stateFile = path.join(app.getPath('userData'), 'window-state.json');
-  const saved = readState(stateFile);
-  const bounds = windowOptions(saved.bounds, screen.getAllDisplays(), screen.getPrimaryDisplay(), { width: 640, height: 500 });
-  const win = new BrowserWindow({
-    title: '1904 Desktop', icon: ICON,
-    ...bounds,
-    backgroundColor: palette.color,
-    titleBarStyle: mac ? 'hiddenInset' : 'hidden',
-    ...(mac ? { trafficLightPosition: { x: 14, y: 15 } } : {
-      titleBarOverlay: { ...palette, height: CHROME_HEIGHT }, autoHideMenuBar: true,
-    }),
-    webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'chrome-preload.cjs') },
-  });
-  mainWindow = win;
   const view = new WebContentsView({
-    webPreferences: { ...WINDOW_PREFERENCES, preload: path.join(__dirname, 'dashboard-preload.cjs') },
+    webPreferences: { ...windowPreferencesFor(partition), preload: path.join(__dirname, 'dashboard-preload.cjs') },
   });
   dashboardView = view;
   const contents = view.webContents;
   dashboardContents = contents;
+  partitionByContents.set(contents, partition);
   // Real input reaches these from the operating system; events a page dispatches itself never do.
   contents.on('before-input-event', (_event, input) => computerInput.key(input));
   // Only while the Agents page has said a task's tabs are on screen; otherwise nothing is held back here.
@@ -724,28 +771,8 @@ function createWindow() {
   });
   view.setBackgroundColor(palette.color);
   win.contentView.addChildView(view);
-  win.on('resize', sizeDashboard);
   sizeDashboard();
-  if (saved.maximized === true) win.maximize();
-  win.on('close', () => saveState(stateFile, { bounds: win.getNormalBounds(), maximized: win.isMaximized() }));
-
-  win.on('closed', () => {
-    if (!contents.isDestroyed()) contents.close();
-    if (mainWindow === win) {
-      mainWindow = undefined;
-      dashboardView = undefined;
-      dashboardContents = undefined;
-      dashboardTheme = undefined;
-      taskTitleBar = false;
-      taskTabKeys = false;
-      taskNavigationReady = false;
-      closeTaskNoticeWindow();
-      clearTimeout(recovery?.timer);
-      recovery = undefined;
-    }
-  });
-  win.webContents.on('dom-ready', () => { syncTitleBar(); sendRecovery(); sendComputerIndicator(); });
-  void win.loadFile(path.join(__dirname, 'chrome.html'));
+  syncTitleBar();
 
   contents.on('did-navigate', (_event, url, httpResponseCode) => {
     setTaskTitleBar(false);
@@ -766,23 +793,70 @@ function createWindow() {
     else contents.send('1904:task-title-bar-replay');
   });
   contents.on('dom-ready', () => {
+    if (contents !== dashboardContents) return;
     if (is1904(contents.getURL())) void contents.insertCSS(DASHBOARD_CSS).catch(() => {});
     if (!recovery && win.isFocused()) contents.focus();
   });
   contents.on('did-fail-load', (_event, code, _description, url, isMainFrame) => {
-    if (isMainFrame && code !== -3 && is1904(url)) startRecovery(net.isOnline() ? 'unreachable' : 'offline', url);
+    if (contents === dashboardContents && isMainFrame && code !== -3 && is1904(url)) startRecovery(net.isOnline() ? 'unreachable' : 'offline', url);
   });
   contents.on('render-process-gone', (_event, details) => {
-    if (contents.isDestroyed() || details.reason === 'clean-exit') return;
+    if (contents !== dashboardContents || contents.isDestroyed() || details.reason === 'clean-exit') return;
     const repeated = Date.now() - lastCrashAt < CRASH_WINDOW_MS;
     lastCrashAt = Date.now();
     // The first crash is reloaded without a word; only a page that keeps crashing is shown as broken.
     if (repeated) startRecovery('crashed', contents.getURL());
     else loadPage(contents, retryTarget(contents.getURL(), ORIGIN, fallbackUrl()));
   });
+  if (initialUrl) loadPage(contents, initialUrl);
+  return contents;
+}
+
+function createWindow() {
+  const mac = process.platform === 'darwin';
+  const palette = PALETTE[activeTheme()];
+  const stateFile = path.join(app.getPath('userData'), 'window-state.json');
+  const saved = readState(stateFile);
+  const bounds = windowOptions(saved.bounds, screen.getAllDisplays(), screen.getPrimaryDisplay(), { width: 640, height: 500 });
+  const win = new BrowserWindow({
+    title: '1904 Desktop', icon: ICON,
+    ...bounds,
+    backgroundColor: palette.color,
+    titleBarStyle: mac ? 'hiddenInset' : 'hidden',
+    ...(mac ? { trafficLightPosition: { x: 14, y: 15 } } : {
+      titleBarOverlay: { ...palette, height: CHROME_HEIGHT }, autoHideMenuBar: true,
+    }),
+    webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'chrome-preload.cjs') },
+  });
+  mainWindow = win;
+  win.on('resize', sizeDashboard);
+  if (saved.maximized === true) win.maximize();
+  win.on('close', () => saveState(stateFile, { bounds: win.getNormalBounds(), maximized: win.isMaximized() }));
+
+  win.on('closed', () => {
+    if (dashboardContents && !dashboardContents.isDestroyed()) dashboardContents.close();
+    if (mainWindow === win) {
+      mainWindow = undefined;
+      dashboardView = undefined;
+      dashboardContents = undefined;
+      dashboardTheme = undefined;
+      taskTitleBar = false;
+      taskTabKeys = false;
+      taskNavigationReady = false;
+      closeTaskNoticeWindow();
+      clearTimeout(recovery?.timer);
+      recovery = undefined;
+    }
+  });
+  win.webContents.on('dom-ready', () => { syncTitleBar(); sendRecovery(); sendComputerIndicator(); sendAccountsToChrome(); });
+  void win.loadFile(path.join(__dirname, 'chrome.html'));
+
+  const contents = mountDashboardView(win, null);
   const link = queuedLink;
   queuedLink = undefined;
-  if (!handleLink(link)) loadPage(contents, AGENTS);
+  const active = accountStore?.active();
+  const initialTarget = isEmptyPending(active) ? `${ORIGIN}/login?returnTo=%2Fagents` : AGENTS;
+  if (!handleLink(link)) loadPage(contents, initialTarget);
   return win;
 }
 
@@ -839,6 +913,191 @@ function computerMenu() {
   ];
 }
 
+function menuEscape(text) {
+  return process.platform === 'win32' ? String(text).replace(/&/g, '&&') : String(text);
+}
+
+function sendAccountsToChrome() {
+  if (accountStore && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('1904:chrome-accounts', accountStore.snapshot());
+  }
+}
+
+function broadcastAccounts() {
+  if (!accountStore) return;
+  const snapshot = accountStore.snapshot();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('1904:chrome-accounts', snapshot);
+  if (dashboardContents && !dashboardContents.isDestroyed()) dashboardContents.send('1904:accounts-changed', snapshot);
+  installMenu();
+}
+
+function switchAccount(id, { url = AGENTS, load = true } = {}) {
+  if (!accountStore) return null;
+  const result = accountStore.switchTo(id);
+  if (!result.ok) return accountStore.snapshot();
+  clearPartitions(result.removedPartitions);
+  const win = showDashboard();
+  if (result.changed) {
+    loginReturnTo = '/agents';
+    mountDashboardView(win, load ? (result.account.signedIn ? url : `${ORIGIN}/login?returnTo=%2Fagents`) : null);
+  } else if (load && dashboardContents && !dashboardContents.isDestroyed()) {
+    dashboardContents.focus();
+  }
+  broadcastAccounts();
+  return accountStore.snapshot();
+}
+
+function addAccount() {
+  if (!accountStore) return null;
+  const result = accountStore.beginAdd();
+  if (!result.ok) {
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+    void messageBox({
+      type: 'info',
+      title: '1904 Accounts',
+      message: `Up to ${MAX_ACCOUNTS} accounts can be added`,
+      detail: 'Remove an unused account from 1904 Desktop before adding another one.',
+      buttons: ['OK'],
+    }, parent);
+    return accountStore.snapshot();
+  }
+  const win = showDashboard();
+  loginReturnTo = '/agents';
+  mountDashboardView(win, `${ORIGIN}/login?returnTo=%2Fagents`);
+  broadcastAccounts();
+  return accountStore.snapshot();
+}
+
+async function removeAccount(id, { confirm = true } = {}) {
+  if (!accountStore) return null;
+  const target = accountStore.get(id);
+  if (!target) return accountStore.snapshot();
+  if (confirm) {
+    const label = target.email ? `${accountLabel(target)} (${target.email})` : accountLabel(target);
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+    const { response } = await messageBox({
+      type: 'question',
+      title: 'Remove 1904 Account',
+      message: `Remove ${label} from 1904 Desktop?`,
+      detail: 'This signs the account out of 1904 Desktop and clears its saved session on this computer. Your 1904 account and workspaces are not deleted.',
+      buttons: ['Cancel', 'Remove'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    }, parent);
+    if (response !== 1) return accountStore.snapshot();
+  }
+  const result = accountStore.remove(id);
+  if (!result.ok) return accountStore.snapshot();
+  clearPartitions(result.removedPartitions);
+  if (result.switched && mainWindow && !mainWindow.isDestroyed()) {
+    loginReturnTo = '/agents';
+    const nextUrl = result.active.signedIn ? AGENTS : `${ORIGIN}/login?returnTo=%2Fagents`;
+    mountDashboardView(mainWindow, nextUrl);
+  }
+  broadcastAccounts();
+  return accountStore.snapshot();
+}
+
+function accountMenuLabel(account) {
+  const title = accountLabel(account);
+  const parts = [];
+  if (account.email && account.email !== title) parts.push(account.email);
+  if (account.workspaceName && account.workspaceName !== title) parts.push(account.workspaceName);
+  if (!account.signedIn && (account.email || account.userId)) parts.push('Signed out');
+  return menuEscape(parts.length ? `${title} — ${parts.join(' · ')}` : title);
+}
+
+function accountsMenuItems() {
+  if (!accountStore) return [];
+  const snap = accountStore.snapshot();
+  const saved = snap.accounts.filter(account => !isEmptyPending(account));
+  const items = snap.accounts.map((account, index) => ({
+    label: accountMenuLabel(account),
+    type: 'radio',
+    checked: account.active,
+    accelerator: index < 8 ? `CmdOrCtrl+Alt+${index + 1}` : undefined,
+    click: () => { switchAccount(account.id); },
+  }));
+  if (items.length) items.push({ type: 'separator' });
+  items.push({
+    label: 'Add Account…',
+    enabled: snap.canAdd,
+    click: () => { addAccount(); },
+  });
+  if (saved.length > 0) {
+    items.push({
+      label: 'Remove Account',
+      submenu: saved.map(account => ({
+        label: accountMenuLabel(account),
+        click: () => { void removeAccount(account.id, { confirm: true }); },
+      })),
+    });
+  }
+  return items;
+}
+
+function showAccountMenu(coords) {
+  if (!mainWindow || mainWindow.isDestroyed() || !accountStore) return;
+  const menu = Menu.buildFromTemplate(accountsMenuItems());
+  const options = { window: mainWindow };
+  if (Number.isFinite(coords?.x) && Number.isFinite(coords?.y)) {
+    options.x = Math.max(0, Math.round(coords.x));
+    options.y = Math.max(0, Math.round(coords.y));
+  }
+  menu.popup(options);
+}
+
+function isDashboardAccountSender(event) {
+  return Boolean(dashboardContents) && !dashboardContents.isDestroyed() &&
+    event.sender === dashboardContents && event.senderFrame === event.sender.mainFrame &&
+    is1904(event.senderFrame?.url);
+}
+
+function installAccountHandlers() {
+  ipcMain.handle('1904:accounts-state', event => (isDashboardAccountSender(event) && accountStore ? accountStore.snapshot() : null));
+  ipcMain.handle('1904:accounts-sync', (event, profile) => {
+    if (!isDashboardAccountSender(event) || !accountStore) return null;
+    const result = accountStore.syncActive(profile);
+    if (result.removedPartitions.length) clearPartitions(result.removedPartitions);
+    if (result.deduplicated && mainWindow && !mainWindow.isDestroyed()) {
+      mountDashboardView(mainWindow, AGENTS);
+    }
+    if (result.changed) broadcastAccounts();
+    return accountStore.snapshot();
+  });
+  ipcMain.on('1904:accounts-signed-out', (event) => {
+    if (!isDashboardAccountSender(event) || !accountStore) return;
+    if (accountStore.markSignedOut().changed) broadcastAccounts();
+  });
+  ipcMain.handle('1904:accounts-switch', (event, id) => {
+    if (!isDashboardAccountSender(event) || !accountStore || !isAccountId(id)) return null;
+    if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) {
+      return accountStore.snapshot();
+    }
+    return switchAccount(id);
+  });
+  ipcMain.handle('1904:accounts-add', (event) => {
+    if (!isDashboardAccountSender(event) || !accountStore) return null;
+    if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) {
+      return accountStore.snapshot();
+    }
+    return addAccount();
+  });
+  ipcMain.handle('1904:accounts-remove', (event, id) => {
+    if (!isDashboardAccountSender(event) || !accountStore || !isAccountId(id)) return null;
+    if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) {
+      return accountStore.snapshot();
+    }
+    return removeAccount(id, { confirm: true });
+  });
+  ipcMain.on('1904:chrome-account-menu', (event, coords) => {
+    if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && event.senderFrame === event.sender.mainFrame) {
+      showAccountMenu(coords);
+    }
+  });
+}
+
 function installMenu() {
   const mac = process.platform === 'darwin';
   const updates = menuUpdates;
@@ -847,6 +1106,7 @@ function installMenu() {
     { label: '1904', submenu: [
       { label: 'Open Agents', accelerator: 'CmdOrCtrl+Shift+A', click: () => { loginReturnTo = '/agents'; showDashboard(); loadPage(dashboardContents, AGENTS); } },
       { label: 'Open Copied 1904 Link', accelerator: 'CmdOrCtrl+Shift+O', click: () => { showDashboard(); openCopiedLink(); } },
+      ...(accountStore ? [{ label: 'Accounts', submenu: accountsMenuItems() }] : []),
       { label: 'Sign In with Browser…', click: beginBrowserSignIn },
       { label: 'Open in Browser', click: () => openBrowser(AGENTS) },
       ...computerMenu(),
@@ -1015,9 +1275,15 @@ function onComputerNotice(notice) {
   computerChanged();
 }
 
-// Through the dashboard's own session, so these requests carry its sign-in and its Cloudflare clearance.
+// Through the active account's session, so these requests carry its sign-in and its Cloudflare clearance.
 function sessionFetch(url, init) {
-  return session.fromPartition(PARTITION).fetch(url, init);
+  return session.fromPartition(activePartition()).fetch(url, init);
+}
+
+// Use My Computer polls with its own bearer token; stay on its paired account's partition when present.
+function computerFetch(url, init) {
+  const partition = accountStore?.partitionForEmail(computerLink?.info()?.account) || activePartition();
+  return session.fromPartition(partition).fetch(url, init);
 }
 
 function messageBox(options, parent) {
@@ -1369,7 +1635,7 @@ function startComputer() {
   let username = '';
   try { username = os.userInfo().username; } catch { /* left empty */ }
   computerBridge = createComputerBridge({
-    origin: ORIGIN, fetch: sessionFetch, link: computerLink, platform, home: os.homedir(), user: username, env: process.env,
+    origin: ORIGIN, fetch: computerFetch, link: computerLink, platform, home: os.homedir(), user: username, env: process.env,
     messages: computerMessages,
     leases: createAwayLeases({ file: path.join(userData, 'computer-away.json') }),
     log: computerLog = createActivityLog({ file: path.join(userData, 'computer-activity.jsonl') }),
@@ -1521,7 +1787,8 @@ if (!app.requestSingleInstanceLock()) {
     void computerBridge.shutdown().finally(() => app.quit());
   });
   void app.whenReady().then(() => {
-    installPermissionRules();
+    accountStore = createAccountStore({ file: path.join(app.getPath('userData'), ACCOUNTS_FILE) });
+    installPermissionRules(activePartition());
     menuUpdates = startUpdater(() => mainWindow, () => {
       updateReady = true;
       installMenu();
@@ -1530,6 +1797,7 @@ if (!app.requestSingleInstanceLock()) {
     startDesktopBrowser();
     installMenu();
     installChromeHandlers();
+    installAccountHandlers();
     installComputerHandlers();
     installDesktopBrowserHandlers();
     desktopReady = true;

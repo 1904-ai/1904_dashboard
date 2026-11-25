@@ -114,6 +114,7 @@ function createDesktopBrowserBridge({file,fetch,origin,confirm,now=Date.now,serv
     setPreference(value){if(!PREFERENCES.has(value))throw new Error('Choose a browser preference.');writeFileSync(file+'.tmp',JSON.stringify({preference:value}),{mode:0o600});renameSync(file+'.tmp',file);setting=value;return state();},
     async setup(){await start();return `http://127.0.0.1:${port}/#${token}`;},
     release(input){if(lease&&lease.scope===input.appId+':'+input.taskId+':'+input.session)end();},
+    resetLease(){if(lease||pending||shared)end();},
     pause(){paused=true;if(shared)reshare=true;end();},resume(){paused=false;},
     close(){end();server?.close();server=undefined;},
   };
