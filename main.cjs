@@ -24,6 +24,7 @@ const {
   createTaskNoticeController, normalizeTaskNotice, noticeBounds,
 } = require('./task-notice.cjs');
 const { installScreenCapture } = require('./screen-capture.cjs');
+const { installSnippetCapture } = require('./snippet-capture.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
 const { createDesktopBrowserBridge } = require('./browser-bridge.cjs');
@@ -1800,6 +1801,12 @@ if (!app.requestSingleInstanceLock()) {
     installAccountHandlers();
     installComputerHandlers();
     installDesktopBrowserHandlers();
+    installSnippetCapture({
+      ipcMain, BrowserWindow, desktopCapturer, nativeImage, screen,
+      getContents: () => dashboardContents, getWindow: () => mainWindow, is1904: isTaskTitleBarPage,
+      permission: () => process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('screen') : 'granted',
+      theme: activeTheme,
+    });
     desktopReady = true;
     showDashboard();
     startSmokeReport({ file: process.env.DESKTOP_SMOKE_REPORT, origin: ORIGIN, chrome: () => mainWindow?.webContents, dashboard: () => dashboardContents });
