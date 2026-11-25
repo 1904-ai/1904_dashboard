@@ -27,6 +27,8 @@ const { installScreenCapture } = require('./screen-capture.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
 const { createDesktopBrowserBridge } = require('./browser-bridge.cjs');
+const { createDeviceInfoReader } = require('./device-info.cjs');
+const readDeviceInfo = createDeviceInfoReader();
 const { createComputerBridge } = require('./computer-bridge.cjs');
 const { createPromptAsk } = require('./computer-approval.cjs');
 const computerProof = require('./computer-proof.cjs');
@@ -1708,6 +1710,7 @@ function installDesktopBrowserHandlers() {
 
 function installComputerHandlers() {
   ipcMain.handle('1904:computer-state', event => isComputerDashboardSender(event) ? computerState() : null);
+  ipcMain.handle('1904:device-info', event => isComputerDashboardSender(event) ? readDeviceInfo() : null);
   // Connecting asks 1904 for a pairing before its question, so the page may start it only right after
   // the person typed or clicked in the window, with it in front.
   ipcMain.handle('1904:computer-connect', event => {
