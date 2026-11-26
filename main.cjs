@@ -3,9 +3,9 @@ const { guardStartup, startSmokeReport } = require('./startup-guard.cjs');
 // A packaged build started with a debugging switch exits here, before Chromium or Node.js can act on it.
 guardStartup(app);
 const { execFile, spawn } = require('node:child_process');
-const { randomUUID } = require('node:crypto');
+const { randomBytes, randomUUID } = require('node:crypto');
 const { existsSync, readFileSync, realpathSync } = require('node:fs');
-const { mkdir, mkdtemp, realpath, rm, stat, writeFile } = require('node:fs/promises');
+const { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { fileURLToPath } = require('node:url');
@@ -35,6 +35,8 @@ const { createPromptAsk } = require('./computer-approval.cjs');
 const computerProof = require('./computer-proof.cjs');
 const { awayBudgetPrompt, awayConfirmPrompt, awayDurationPrompt, createAwayLeases } = require('./computer-away.cjs');
 const { createActivityLog } = require('./computer-log.cjs');
+const computerDeploy = require('./computer-deploy.cjs');
+const deploySsh = require('./computer-deploy-ssh.cjs');
 
 const ORIGIN = 'https://1904.ai';
 const AGENTS = `${ORIGIN}/agents`;
@@ -48,6 +50,8 @@ const PALETTE = {
 const DASHBOARD_CSS = readFileSync(path.join(__dirname, 'dashboard.css'), 'utf8');
 const ACTIVITY_PAGE = path.join(__dirname, 'activity.html');
 const APPROVAL_PAGE = path.join(__dirname, 'approval.html');
+const DEPLOY_PAGE = path.join(__dirname, 'deploy.html');
+const SECRET_PAGE = path.join(__dirname, 'secret.html');
 const TASK_NOTICE_PAGE = path.join(__dirname, 'task-notice.html');
 // The prompt takes no Run until it has been in front this long, and opens only after a pause in the
 // person's typing and clicking in the dashboard (or after the longest wait), so no key press or click
@@ -109,6 +113,16 @@ let computerConnecting;
 let computerQuitting = false;
 let computerMenuKey;
 let activityWindow;
+let deployWindow;
+let deployRecipes;
+let deployApps = new Map();
+let deployMessage;
+let deployFocusedAt = 0;
+let deploySecrets;
+let secretWindow;
+let secretPending;
+/** Save, Run now and Remove take no click until the deploy window has been in front this long, like the prompt's Run. */
+const DEPLOY_ARM_MS = 800;
 // The prompt window, and the request it is asking about: { nonce, resolve, shownAt, focusedAt }.
 let approvalWindow;
 let approvalPending;
@@ -483,6 +497,9 @@ function syncTitleBar() {
   if (activityWindow && !activityWindow.isDestroyed()) {
     activityWindow.setBackgroundColor(palette.color);
     activityWindow.webContents.send('1904:activity-theme', theme);
+  }
+  if (deployWindow && !deployWindow.isDestroyed()) {
+    deployWindow.webContents.send('1904:deploy-theme', theme);
   }
   if (approvalWindow && !approvalWindow.isDestroyed()) {
     approvalWindow.setBackgroundColor(palette.color);
@@ -911,6 +928,7 @@ function computerMenu() {
       ] }
       : { label: 'Use My Computer…', click: () => { void connectComputer(); } },
     { label: 'Computer Activity', click: () => showActivity() },
+    { label: 'Deploy From This Computer…', click: () => showDeploys() },
   ];
 }
 
@@ -1272,6 +1290,22 @@ function onComputerNotice(notice) {
   } else if (notice.kind === 'away-ended') {
     const why = { time: 'Its time is up.', budget: 'It used its command budget.', elsewhere: 'It was ended from 1904.', desktop: 'You ended it.' }[notice.reason] || '';
     computerNotice('Away mode ended', `“${task}”. ${why}`.trim());
+  } else if (notice.kind === 'deploy-run') {
+    // A deploy that runs without asking is always announced, so it never runs unseen.
+    const name = computerPolicy.shortLine(notice.request.app.name, 60);
+    computerNotice(`Deploying ${name}`, 'Running the deploy commands you saved on this computer, without asking. Open Computer Activity to watch or stop it.');
+  } else if (notice.kind === 'deploy-finished') {
+    const name = computerPolicy.shortLine(notice.request.app.name, 60);
+    if (notice.status === 'done') computerNotice(`Deployed ${name}`, 'The deploy commands finished.');
+    else computerNotice(`${name} did not deploy`, Number.isInteger(notice.exitCode) ? `The commands ended with exit code ${notice.exitCode}. Open Computer Activity for the output.` : 'Open Computer Activity for what happened.');
+    sendDeployState();
+  } else if (notice.kind === 'dry-run-finished') {
+    // Shown in the deploy window, where the person is: what the host said, and whether anything would stop a deploy.
+    if (deployWindow && !deployWindow.isDestroyed()) {
+      deployWindow.webContents.send('1904:deploy-dry-run-result', {
+        appId: notice.request.app.id, ok: notice.status === 'done', output: computerPolicy.visibleText(String(notice.output ?? '').slice(-8000)),
+      });
+    }
   }
   computerChanged();
 }
@@ -1535,6 +1569,7 @@ function computerChanged() {
   }
   activityStateDirty = true;
   activityStateTimer ??= setTimeout(sendActivityState, 50);
+  sendDeployState();
 }
 
 function focusComputerPrompt() {
@@ -1640,6 +1675,9 @@ function startComputer() {
     messages: computerMessages,
     leases: createAwayLeases({ file: path.join(userData, 'computer-away.json') }),
     log: computerLog = createActivityLog({ file: path.join(userData, 'computer-activity.jsonl') }),
+    deploys: deployRecipes = computerDeploy.createDeployRecipes({ file: path.join(userData, computerDeploy.RECIPES_FILE) }),
+    deploySecrets: deploySecrets = deploySsh.createDeploySecrets({ file: path.join(userData, deploySsh.SECRETS_FILE), vault: deploySsh.createVault(safeStorage) }),
+    askSecret: askDeployPassword,
     userData, tmpRoot: os.tmpdir(), exists: existsSync, realpathSync,
     fs: { mkdir, stat, mkdtemp, rm, realpath, writeFile }, spawn, kill: (pid, signal) => process.kill(pid, signal), gitIdentity,
     clock: { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: timer => clearTimeout(timer) },
@@ -1662,6 +1700,9 @@ function startComputer() {
   });
   powerMonitor.on('suspend', () => computerBridge.suspend());
   powerMonitor.on('resume', () => computerBridge.resume());
+  // No pairing at startup (never connected, or its file is gone): nothing saved earlier may run without asking once
+  // this computer is connected again, whatever id the new pairing is given.
+  if (!computerLink.info()) { try { deployRecipes.disarm(); } catch { /* it cannot run without a pairing anyway */ } }
   computerBridge.start();
 }
 
@@ -1706,6 +1747,371 @@ function installDesktopBrowserHandlers() {
   });
   ipcMain.handle('1904:browser-release', (event,input) => {
     if(isComputerDashboardSender(event))desktopBrowserBridge.release(input||{});
+  });
+}
+
+// ── Deploy From This Computer ──────────────────────────────────────────────
+// The person saves an app's deploy commands in this window; 1904 can then ask this computer to run them
+// when a change of theirs merges. The commands, the connect line and "Submit without approval" live only
+// here (computer-deploy.cjs): the dashboard page can open this window and nothing else, and 1904 is told
+// only that an app has commands, in what order it deploys, and whether it asks first.
+
+function isDeployPage(url) {
+  try {
+    const file = fileURLToPath(url);
+    return process.platform === 'win32' ? file.toLowerCase() === DEPLOY_PAGE.toLowerCase() : file === DEPLOY_PAGE;
+  } catch {
+    return false;
+  }
+}
+
+function isDeploySender(event) {
+  return Boolean(deployWindow) && !deployWindow.isDestroyed() && event.sender === deployWindow.webContents &&
+    event.senderFrame === event.sender.mainFrame && isDeployPage(event.senderFrame?.url);
+}
+
+// A key or click meant for another window must not land on Save or Run now the moment this one is brought forward:
+// the window has to have been in front for a moment first.
+function deployArmed() {
+  return Boolean(deployWindow) && !deployWindow.isDestroyed() && deployWindow.isFocused() && deployFocusedAt > 0 && Date.now() - deployFocusedAt >= DEPLOY_ARM_MS;
+}
+const DEPLOY_NOT_ARMED = { ok: false, error: 'Try that again: the window had only just come to the front.' };
+
+function showDeploys() {
+  if (deployWindow && !deployWindow.isDestroyed()) {
+    if (deployWindow.isMinimized()) deployWindow.restore();
+    deployWindow.show();
+    deployWindow.focus();
+    return deployWindow;
+  }
+  const win = new BrowserWindow({
+    title: 'Deploy From This Computer', icon: ICON, width: 720, height: 780, minWidth: 460, minHeight: 420,
+    backgroundColor: PALETTE[activeTheme()].color, autoHideMenuBar: true, show: false,
+    webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'deploy-preload.cjs') },
+  });
+  deployWindow = win;
+  win.on('closed', () => { if (deployWindow === win) deployWindow = undefined; });
+  win.on('focus', () => { deployFocusedAt = Date.now(); });
+  win.on('blur', () => { deployFocusedAt = 0; });
+  win.webContents.on('dom-ready', () => win.webContents.send('1904:deploy-theme', activeTheme()));
+  void win.loadFile(DEPLOY_PAGE);
+  win.show();
+  return win;
+}
+
+/** What the window shows, from what this computer has saved and the app list 1904 last answered. */
+function deployState() {
+  const info = computerLink?.info();
+  const connection = computerBridge?.connection() ?? { connected: false, text: 'Deploy From This Computer is available in 1904 Desktop for macOS and Windows.' };
+  return {
+    platform: computerPlatform(),
+    connection: { connected: Boolean(info), text: info ? `Connected to 1904 as ${info.name}.${connection.paused ? ' Use My Computer is paused, so nothing from 1904 runs until you resume it.' : ''}` : connection.text },
+    apps: [...deployApps.values()].map(appRef => ({ id: appRef.id, name: computerPolicy.visibleLine(appRef.name) })),
+    recipes: (deployRecipes?.all() ?? []).map(recipe => computerDeploy.recipeView(recipe, info?.id)),
+    // Whether a password or a deploy key is kept for each app, and the key's public half. Never a secret.
+    kept: Object.fromEntries([...new Set([...deployApps.keys(), ...(deployRecipes?.all() ?? []).map(recipe => recipe.appId)])].map(appId => {
+      const summary = deploySecrets?.summary(appId, info?.id) ?? { password: false };
+      return [appId, { password: summary.password, publicKey: summary.publicKey ?? '', installCommand: deploySsh.installKeyCommand(summary.publicKey) }];
+    })),
+    ...(deployMessage ? { message: deployMessage } : {}),
+  };
+}
+
+// ── Reaching a host ────────────────────────────────────────────────────────
+// Setting up a host from the deploy window: reading its identity, making a deploy key, and installing that key with a
+// password typed once. Each is a short run of the system's own ssh or ssh-keygen, started here with its arguments as
+// separate words and nothing of 1904 Desktop's environment but what a command gets.
+
+/** Runs one program to its end: `{ code, stdout, stderr }`, never throwing. Its own session, so ssh has no terminal to ask on. */
+function runSetup(file, args, { env, timeoutMs = deploySsh.SETUP_TIMEOUT_MS } = {}) {
+  return new Promise(resolve => {
+    let child;
+    const out = { stdout: '', stderr: '' };
+    try {
+      child = spawn(file, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
+    } catch (error) {
+      resolve({ code: null, stdout: '', stderr: String(error?.message ?? error) });
+      return;
+    }
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, timeoutMs);
+    for (const stream of ['stdout', 'stderr']) child[stream]?.on('data', chunk => { out[stream] = (out[stream] + chunk).slice(-16 * 1024); });
+    child.on('error', error => { clearTimeout(timer); resolve({ code: null, ...out, stderr: out.stderr || String(error?.message ?? error) }); });
+    child.on('close', code => { clearTimeout(timer); resolve({ code, ...out }); });
+  });
+}
+
+/** A folder of this app's own for one setup job, removed when the job is done. */
+async function withSetupFolder(job) {
+  const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), '1904-deploy-setup-')));
+  try { return await job(dir); } finally { rm(dir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+function setupEnvironment(tempDir) {
+  const platform = computerPlatform();
+  const shell = computerPolicy.computerShell({ platform, env: process.env, exists: existsSync });
+  return computerPolicy.commandEnvironment({ platform, env: process.env, searchPath: process.env.PATH || process.env.Path, tempDir, shellFile: shell.file });
+}
+
+const NO_SSH = { ok: false, error: 'This computer has no ssh program. Install OpenSSH, then try again.' };
+/** The host as typed, before its identity is known: checked like a saved one, with a stand-in for the keys it does not have yet. */
+function typedHost(input) {
+  const auth = deploySsh.DEPLOY_AUTH.includes(input?.auth) ? input.auth : 'key';
+  const checked = deploySsh.cleanHost({ ...input, auth: 'ssh', user: input?.user });
+  if (!checked.ok) return checked;
+  if (!checked.host.user) return { ok: false, error: 'Enter the user name to sign in as on the host.' };
+  return { ok: true, host: { ...checked.host, port: checked.host.port ?? 22, auth } };
+}
+
+/** Check host: what the host shows as its identity, for the person to compare and trust. Nothing is signed in to. */
+async function checkDeployHost(input) {
+  const typed = typedHost(input);
+  if (!typed.ok) return typed;
+  const ssh = deploySsh.sshProgram('ssh', { platform: computerPlatform(), env: process.env, exists: existsSync });
+  if (!ssh) return NO_SSH;
+  return withSetupFolder(async dir => {
+    const knownHosts = path.join(dir, 'known_hosts');
+    const ran = await runSetup(ssh, deploySsh.hostKeyArgs({ host: typed.host, knownHosts }), { env: setupEnvironment(dir) });
+    let text = '';
+    try { text = await readFile(knownHosts, 'utf8'); } catch { /* the host never answered */ }
+    const keys = deploySsh.readHostKeys(text, typed.host);
+    return keys.length ? { ok: true, keys } : { ok: false, error: deploySsh.sshProblem(ran.stderr) };
+  });
+}
+
+/** Create deploy key: a new key pair for this app, its private half sealed with the system's key store at once. */
+async function makeDeployKey(appId) {
+  const info = computerLink?.info();
+  const appRef = deployApps.get(appId) ?? deployRecipes?.all().find(recipe => recipe.appId === appId);
+  if (!info || !appRef || !deploySecrets) return { ok: false, error: 'Connect this computer and choose one of your apps first.' };
+  const keygen = deploySsh.sshProgram('ssh-keygen', { platform: computerPlatform(), env: process.env, exists: existsSync });
+  if (!keygen) return NO_SSH;
+  try {
+    return await withSetupFolder(async dir => {
+      const file = path.join(dir, 'key');
+      const ran = await runSetup(keygen, deploySsh.keygenArgs({ file, comment: appRef.name ?? appRef.appName }), { env: setupEnvironment(dir) });
+      if (ran.code !== 0) return { ok: false, error: 'Could not make a key on this computer.' };
+      await deploySecrets.setKey(appId, info.id, { privateKey: await readFile(file, 'utf8'), publicKey: await readFile(file + '.pub', 'utf8') });
+      return { ok: true, state: deployState() };
+    });
+  } catch (error) {
+    return { ok: false, error: computerPolicy.label(error?.message, 300) || 'Could not keep the new key on this computer.' };
+  }
+}
+
+/** Install the key: signs in once with the password just typed, adds the public key on the host, and keeps no password. */
+async function installDeployKey(appId, input, password) {
+  const info = computerLink?.info();
+  const typed = deploySsh.cleanHost({ ...input, auth: 'password-ask' });
+  if (!typed.ok) return typed;
+  const key = info && deploySecrets?.summary(appId, info.id).publicKey;
+  if (!key) return { ok: false, error: 'Create the deploy key first.' };
+  const secret = deploySsh.cleanPassword(password);
+  if (!secret) return { ok: false, error: 'Enter the password for the host.' };
+  const ssh = deploySsh.sshProgram('ssh', { platform: computerPlatform(), env: process.env, exists: existsSync });
+  if (!ssh) return NO_SSH;
+  return withSetupFolder(async dir => {
+    const knownHosts = path.join(dir, 'known_hosts');
+    await writeFile(knownHosts, typed.host.keys.join('\n') + '\n', { mode: 0o600 });
+    const helper = deploySsh.askpass({ platform: computerPlatform() });
+    const helperFile = path.join(dir, helper.name);
+    await writeFile(helperFile, helper.text, { mode: helper.mode ?? 0o600 });
+    const nonce = randomBytes(8).toString('hex');
+    const ran = await runSetup(ssh, deploySsh.sshArgs({ host: typed.host, files: { knownHosts }, word: computerDeploy.scriptWord(deploySsh.installKeyScript(key, nonce)) }),
+      { env: { ...setupEnvironment(dir), ...deploySsh.passwordEnvironment({ helper: helperFile, password: secret, env: process.env }) } });
+    const done = computerDeploy.readDeployOutput(ran.stdout, nonce);
+    if (ran.code === 0 && done.confirmed) return { ok: true };
+    return { ok: false, error: ran.code === 0 ? 'The host did not confirm that the key was added.' : deploySsh.sshProblem(ran.stderr, { password: true }) };
+  });
+}
+
+// ── A password typed for one deploy ────────────────────────────────────────
+// For a host whose password the person chose not to save: a small window of this app's own asks for it when a deploy
+// is about to start. What is typed goes to ssh for that one run and is not kept.
+
+function isSecretSender(event) {
+  if (!secretWindow || secretWindow.isDestroyed() || event.sender !== secretWindow.webContents || event.senderFrame !== event.sender.mainFrame) return false;
+  try {
+    const file = fileURLToPath(event.senderFrame?.url);
+    return process.platform === 'win32' ? file.toLowerCase() === SECRET_PAGE.toLowerCase() : file === SECRET_PAGE;
+  } catch {
+    return false;
+  }
+}
+
+function settleSecret(value) {
+  const pending = secretPending;
+  secretPending = undefined;
+  if (secretWindow && !secretWindow.isDestroyed()) secretWindow.close();
+  secretWindow = undefined;
+  pending?.resolve(value);
+}
+
+function askDeployPassword({ request, host }) {
+  if (secretPending) settleSecret(undefined);
+  return new Promise(resolve => {
+    const nonce = randomBytes(16).toString('hex');
+    // Nobody at the computer: the deploy is given up rather than left holding the ones behind it.
+    const timer = setTimeout(() => { if (secretPending?.nonce === nonce) settleSecret(undefined); }, 10 * 60_000);
+    secretPending = { nonce, resolve: value => { clearTimeout(timer); resolve(value); } };
+    const win = new BrowserWindow({
+      title: 'Deploy From This Computer', icon: ICON, width: 460, height: 260, resizable: false, minimizable: false, maximizable: false, fullscreenable: false,
+      backgroundColor: PALETTE[activeTheme()].color, autoHideMenuBar: true, show: false,
+      webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'secret-preload.cjs') },
+    });
+    secretWindow = win;
+    win.on('closed', () => { if (secretPending?.nonce === nonce) settleSecret(undefined); });
+    win.webContents.on('dom-ready', () => win.webContents.send('1904:secret-view', {
+      nonce, theme: activeTheme(),
+      heading: `Password to deploy ${computerPolicy.visibleLine(request.app.name)}`,
+      detail: `For ${computerPolicy.visibleLine(`${host.user}@${host.name}`)}. It is used for this deploy only and is not saved.`,
+    }));
+    void win.loadFile(SECRET_PAGE);
+    win.show();
+    if (Notification.isSupported() && !win.isFocused()) computerNotice('A deploy needs your password', `Open 1904 Desktop to deploy ${computerPolicy.shortLine(request.app.name, 60)}.`);
+  });
+}
+
+function sendDeployState() {
+  if (deployWindow && !deployWindow.isDestroyed()) deployWindow.webContents.send('1904:deploy-state', deployState());
+}
+
+/**
+ * Tells 1904 which apps have commands here (never the commands), and reads the apps it lists. Sent whole each
+ * time, so a save or a removal that did not reach 1904 is put right by the next one.
+ */
+async function syncDeploys() {
+  const info = computerLink?.info();
+  if (!computerBridge || !deployRecipes || !info) { deployMessage = undefined; return false; }
+  const recipes = deployRecipes.all().filter(recipe => recipe.computerId === info.id).map(recipe => {
+    const { action: _action, ...registration } = computerDeploy.recipeRegistration(recipe);
+    return registration;
+  });
+  const sent = await computerBridge.deployCall({ action: 'sync', recipes });
+  if (sent.ok && Array.isArray(sent.body?.apps)) {
+    deployApps = new Map(sent.body.apps.flatMap(entry => {
+      const id = typeof entry?.id === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(entry.id) ? entry.id : undefined;
+      return id ? [[id, { id, name: computerPolicy.label(entry.name) || 'Untitled app', repo: computerPolicy.label(entry.repo) || '' }]] : [];
+    }));
+    deployMessage = sent.body.enabled === false ? computerPolicy.label(sent.body.message, 300) || 'Use My Computer is turned off for your workspace.' : undefined;
+    return true;
+  }
+  deployMessage = sent.status === 404
+    ? '1904 has not been updated for deploys from a computer yet. Your commands are saved here and will work once it is.'
+    : 'Could not reach 1904 just now. Your commands are saved on this computer; 1904 hears about them the next time this window opens.';
+  return false;
+}
+
+async function saveDeployRecipe(appId, input) {
+  const info = computerLink?.info();
+  if (!computerBridge || !deployRecipes || !info) return { ok: false, error: 'Connect this computer first: choose Use My Computer… in the 1904 menu.' };
+  const appRef = deployApps.get(appId) ?? deployRecipes.all().find(recipe => recipe.appId === appId && recipe.computerId === info.id);
+  if (!appRef) return { ok: false, error: 'Choose one of your apps.' };
+  const checked = computerDeploy.cleanRecipe(input);
+  if (!checked.ok) return { ok: false, error: checked.error };
+  if (computerPlatform() === 'windows' && !computerDeploy.isRemote(checked.recipe) && checked.recipe.log.mode !== 'output') {
+    return { ok: false, error: 'A log file needs a connect line on Windows. Choose “What the commands print”, or add how to connect.' };
+  }
+  const appName = appRef.name ?? appRef.appName;
+  const previous = deployRecipes.get(appId, info.id);
+  const { host } = checked.recipe;
+  const typedPassword = deploySsh.cleanPassword(input?.password);
+  if (host?.auth === 'key' && !deploySecrets?.summary(appId, info.id).publicKey) return { ok: false, error: 'Create the deploy key first, and add it on the host.' };
+  if (host?.auth === 'password-saved' && !typedPassword && !deploySecrets?.summary(appId, info.id).password) return { ok: false, error: 'Enter the password to save for this host.' };
+  // Running without asking is granted for exactly these commands: turning it on, or changing them while it is on, asks.
+  if (checked.recipe.noApproval && (!previous?.noApproval || previous.hash !== computerDeploy.recipeHash(checked.recipe))) {
+    const { response } = await messageBox(computerDeploy.noApprovalPrompt({ ...checked.recipe, appName }, info.name), deployWindow);
+    if (response !== 1) return { ok: false, cancelled: true };
+    if ((await confirmWithTouchId('let these deploy commands run without asking')) === false) return { ok: false, cancelled: true };
+  }
+  let saved;
+  try {
+    // The password goes to the system's key store before anything that would use it is saved; one that is no longer wanted is forgotten.
+    if (host?.auth === 'password-saved' && typedPassword) await deploySecrets.setPassword(appId, info.id, typedPassword);
+    else if (host?.auth !== 'password-saved') deploySecrets?.forget(appId, 'password');
+    saved = deployRecipes.save({ appId, appName, repo: appRef.repo, computerId: info.id }, checked.recipe);
+  } catch (error) {
+    return { ok: false, error: computerPolicy.label(error?.message, 300) || 'Could not save on this computer.' };
+  }
+  if (!saved.ok) return { ok: false, error: saved.error };
+  const told = await syncDeploys();
+  computerChanged();
+  return { ok: true, ...(told ? {} : { warning: `Saved on this computer. ${deployMessage}` }), state: deployState() };
+}
+
+async function removeDeployRecipe(appId) {
+  if (!deployRecipes) return { ok: false, error: 'Nothing to remove.' };
+  const recipe = deployRecipes.all().find(entry => entry.appId === appId);
+  if (!recipe) return { ok: false, error: 'This app has no deploy commands on this computer.' };
+  const { response } = await messageBox({
+    type: 'question', title: 'Deploy From This Computer', message: `Remove ${computerPolicy.visibleLine(computerPolicy.label(recipe.appName, 80) || 'this app')}’s deploy commands from this computer?`,
+    detail: '1904 can no longer ask this computer to deploy this app.', buttons: ['Cancel', 'Remove'], defaultId: 0, cancelId: 0, noLink: true,
+  }, deployWindow);
+  if (response !== 1) return { ok: false, cancelled: true };
+  try {
+    deployRecipes.remove(appId);
+    // Its deploy key and saved password go with it.
+    deploySecrets?.forget(appId);
+  } catch { return { ok: false, error: 'Could not remove it from this computer.' }; }
+  await syncDeploys();
+  computerChanged();
+  return { ok: true, state: deployState() };
+}
+
+function installDeployHandlers() {
+  ipcMain.handle('1904:deploy-state', async (event) => {
+    if (!isDeploySender(event)) return null;
+    await syncDeploys().catch(() => false);
+    return deployState();
+  });
+  ipcMain.handle('1904:deploy-save', (event, appId, input) => {
+    if (!isDeploySender(event) || typeof appId !== 'string') return null;
+    return deployArmed() ? saveDeployRecipe(appId, input) : DEPLOY_NOT_ARMED;
+  });
+  ipcMain.handle('1904:deploy-remove', (event, appId) => {
+    if (!isDeploySender(event) || typeof appId !== 'string') return null;
+    return deployArmed() ? removeDeployRecipe(appId) : DEPLOY_NOT_ARMED;
+  });
+  // Run now: the person's own click in this window, for commands they saved in it. The window only offers it while the
+  // form shows exactly what is saved, so what runs is what they are looking at.
+  ipcMain.handle('1904:deploy-run', (event, appId) => {
+    if (!isDeploySender(event) || typeof appId !== 'string' || !computerBridge) return null;
+    if (!deployArmed()) return DEPLOY_NOT_ARMED;
+    const started = computerBridge.runDeployNow(appId);
+    if (started.ok) showActivity({ focus: false });
+    return started.ok ? { ok: true, state: deployState() } : { ok: false, error: started.message };
+  });
+  ipcMain.handle('1904:deploy-dry-run', (event, appId) => {
+    if (!isDeploySender(event) || typeof appId !== 'string' || !computerBridge) return null;
+    if (!deployArmed()) return DEPLOY_NOT_ARMED;
+    const started = computerBridge.runDeployNow(appId, { dryRun: true });
+    return started.ok ? { ok: true, state: deployState() } : { ok: false, error: started.message };
+  });
+  ipcMain.handle('1904:deploy-check-host', (event, input) => isDeploySender(event) ? checkDeployHost(input).catch(() => ({ ok: false, error: 'Could not check the host.' })) : null);
+  ipcMain.handle('1904:deploy-make-key', (event, appId) => {
+    if (!isDeploySender(event) || typeof appId !== 'string') return null;
+    return deployArmed() ? makeDeployKey(appId) : DEPLOY_NOT_ARMED;
+  });
+  ipcMain.handle('1904:deploy-install-key', (event, appId, input, password) => {
+    if (!isDeploySender(event) || typeof appId !== 'string') return null;
+    return deployArmed() ? installDeployKey(appId, input, password).catch(() => ({ ok: false, error: 'Could not add the key on the host.' })) : DEPLOY_NOT_ARMED;
+  });
+  // Copy the command that adds this app's public key on the host by hand. The key is public; nothing secret is copied.
+  ipcMain.on('1904:deploy-copy-install', (event, appId) => {
+    if (!isDeploySender(event) || typeof appId !== 'string') return;
+    const command = deploySsh.installKeyCommand(deploySecrets?.summary(appId, computerLink?.info()?.id).publicKey);
+    if (command) clipboard.writeText(command);
+  });
+  ipcMain.on('1904:secret-answer', (event, nonce, value) => {
+    if (!isSecretSender(event) || !secretPending || nonce !== secretPending.nonce) return;
+    settleSecret(deploySsh.cleanPassword(value));
+  });
+  // The dashboard can open the window, nothing more, and only right after the person typed or clicked in the dashboard
+  // with it in front: a page cannot raise this window at a moment of its own choosing.
+  ipcMain.on('1904:computer-deploys', (event) => {
+    if (!dashboardContents || event.sender !== dashboardContents || event.senderFrame !== event.sender.mainFrame) return;
+    if (webUrl(event.senderFrame?.url)?.origin !== ORIGIN) return;
+    if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) return;
+    showDeploys();
   });
 }
 
@@ -1800,6 +2206,7 @@ if (!app.requestSingleInstanceLock()) {
     installChromeHandlers();
     installAccountHandlers();
     installComputerHandlers();
+    installDeployHandlers();
     installDesktopBrowserHandlers();
     installSnippetCapture({
       ipcMain, BrowserWindow, desktopCapturer, nativeImage, screen,
