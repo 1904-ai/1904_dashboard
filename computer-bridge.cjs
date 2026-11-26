@@ -6,13 +6,20 @@
 // way the dashboard's own recovery does; the loop rests while the computer sleeps or the person paused
 // it, and stops for good when 1904 no longer accepts this computer's token. Everything it touches is
 // passed in, so tests drive it with a stand-in 1904, a stand-in shell and a stand-in clock.
+//
+// Deploy From This Computer rides the same connection. 1904 says only "deploy this app at this commit";
+// the commands are the ones the person saved on this computer (computer-deploy.cjs), run one deploy at
+// a time, with a prompt unless they chose there to let that app's commands run without asking.
 
 const path = require('node:path');
+const { randomBytes } = require('node:crypto');
 const { retryDelay } = require('./desktop-recovery.cjs');
 const policy = require('./computer-policy.cjs');
 const { TOO_LONG, createApprovalQueue, promptFits } = require('./computer-approval.cjs');
 const { AWAY_PATH, leaseCovers, readLease } = require('./computer-away.cjs');
 const { PAIR_PATH } = require('./computer-link.cjs');
+const deployPolicy = require('./computer-deploy.cjs');
+const deploySsh = require('./computer-deploy-ssh.cjs');
 const { resolveLoginPath, startRun } = require('./computer-runner.cjs');
 const { SANDBOX_EXEC, sandboxPlan, gitConfigForRun, cleanupPlan } = require('./computer-sandbox.cjs');
 
@@ -66,6 +73,9 @@ const WITHDRAWN = {
 };
 const WITHDRAWN_BY_1904 = '1904 withdrew this request before it started, so it did not run.';
 const UNCONFIRMED = '1904 Desktop could not confirm this command with 1904, so it did not run it.';
+const CANCELLED_DEPLOY = '1904 cancelled this deploy before it started.';
+/** A deploy the person starts here waits in line at most this long. */
+const LOCAL_DEPLOY_WAIT_MS = 2 * 60 * 60_000;
 const NO_SANDBOX = 'This Mac has no sandbox-exec, so 1904 Desktop cannot run this command in its sandbox. Ask for full access if the person agrees.';
 
 function boundedAdd(set, value) {
@@ -83,6 +93,9 @@ function readPoll(body) {
     requests: Array.isArray(body.requests) ? body.requests : [],
     cancelled: ids(body.cancelled),
     awayEnded: ids(body.awayEnded),
+    // Absent from a 1904 that does not know deploys yet.
+    deploys: Array.isArray(body.deploys) ? body.deploys : [],
+    deploysCancelled: ids(body.deploysCancelled),
   };
 }
 
@@ -97,6 +110,10 @@ function readPoll(body) {
  * - `fs`: `{ mkdir, stat, mkdtemp, rm, realpath }` returning promises; `realpathSync` for the sandbox profile.
  * - `spawn`, `kill`, `clock` (`now`, `setTimeout`, `clearTimeout`): passed to the runner.
  * - `onNotice({ kind, ... })`: things the person should hear about as a notification.
+ * - `deploys`: computer-deploy.cjs's saved recipes (optional; without it no deploy is ever answered).
+ *   `nonce()`: 16 hex characters for one deploy run.
+ * - `deploySecrets`: computer-deploy-ssh.cjs's encrypted deploy keys and saved passwords.
+ *   `askSecret({ request, host })`: the person types a password for one deploy; resolves it, or nothing when they cancel.
  */
 function createComputerBridge({
   origin, fetch, link, messages, leases, log, platform, home, user = '', userData, tmpRoot, env = {}, exists = () => false,
@@ -104,6 +121,7 @@ function createComputerBridge({
   confirmLease = async () => false,
   onChange = () => {}, onOutput = () => {}, onDisconnected = () => {}, onNotice = () => {},
   run = startRun, resolvePath = resolveLoginPath, gitIdentity = async () => ({}), removeTemp,
+  deploys, nonce = () => randomBytes(8).toString('hex'), deploySecrets, askSecret = async () => undefined,
 }) {
   // A sandboxed run's temp folder is deleted inside the sandbox, never by an unsandboxed recursive delete
   // that a process the command left behind could point elsewhere with a symbolic link.
@@ -144,7 +162,7 @@ function createComputerBridge({
   let skew;
 
   /** Full access: asked for, or this computer has no sandbox (Windows). Never covered without asking. */
-  const isFull = request => platform !== 'macos' || request.access === 'full';
+  const isFull = request => platform !== 'macos' || request.access === 'full' || request.kind === 'deploy';
   const awayOffered = platform === 'macos';
 
   const describe = request => policy.placeFor({
@@ -168,6 +186,8 @@ function createComputerBridge({
    * allowances cover it (away mode never does: it needs the sandbox).
    */
   function covered(request) {
+    // A deploy is covered only by its own app's "run without asking", decided before it is ever queued here.
+    if (request.kind === 'deploy') return undefined;
     if (platform === 'macos' && request.access === 'full') return undefined;
     const lease = !isFull(request) && coveringLease(request);
     if (lease) return { decision: 'away', network: request.network && lease.network };
@@ -266,10 +286,15 @@ function createComputerBridge({
   function addEntry(request) {
     const place = describe(request);
     const entry = {
-      id: request.id, messageId: request.messageId, task: request.task, sender: request.sender, app: request.app,
+      id: request.id, kind: request.kind, messageId: request.messageId, task: request.task, sender: request.sender, app: request.app,
       command: request.command, reason: request.reason, timeoutSeconds: request.timeoutSeconds,
       access: isFull(request) ? 'full' : 'sandbox', network: false, origin: request.origin?.kind,
-      folder: place.root, cwd: place.path, outside: place.outside, deadline: deadlineFor(request),
+      folder: place.root, cwd: place.path, outside: place.outside,
+      // A deploy can wait in line behind another one, so it keeps 1904's own expiry rather than a prompt's ten minutes,
+      // but never longer than this computer's own limit, whatever 1904 says.
+      deadline: request.kind === 'deploy'
+        ? Math.min(request.expiresAt - (request.local ? 0 : skew ?? 0), clock.now() + deployPolicy.DEPLOY_WAIT_MAX_MS)
+        : deadlineFor(request),
       status: 'waiting', approval: undefined, exitCode: null, message: undefined,
       createdAt: clock.now(), startedAt: undefined, endedAt: undefined, durationMs: undefined,
       output: [], outputLength: 0, outputCut: false,
@@ -363,9 +388,9 @@ function createComputerBridge({
   }
 
   /** Sends a final result. Network errors and 5xx are retried while the computer stays connected. */
-  async function report(update, { retry = true } = {}) {
+  async function report(update, { retry = true, pathname = RESULT_PATH } = {}) {
     for (let attempt = 0; ; attempt++) {
-      const sent = await call(RESULT_PATH, update);
+      const sent = await call(pathname, update);
       if (sent.ok) return true;
       // 409: the request already finished on 1904. 404: it is not this computer's. 401: the token is
       // gone. Any answer below 500 is final; sending it again cannot help.
@@ -380,11 +405,11 @@ function createComputerBridge({
    * confirms. 'confirmed', 'withdrawn' (1904 refused: the request finished, was cancelled, timed out
    * or is not this computer's), 'revoked', or 'unconfirmed' (1904 could not be reached in time).
    */
-  async function confirmRunning(request, cwd) {
+  async function confirmRunning(request, cwd, send = () => call(RESULT_PATH, policy.runningUpdate(request.id, cwd))) {
     for (let attempt = 0; attempt < RUNNING_ATTEMPTS; attempt++) {
       if (attempt) await sleep(retryDelay(attempt - 1));
       if (!active) return 'unconfirmed';
-      const sent = await call(RESULT_PATH, policy.runningUpdate(request.id, cwd));
+      const sent = await send();
       if (sent.ok) return 'confirmed';
       if (sent.status === 401) return 'revoked';
       // The away lease this request came under ended on 1904 (or ran past its time): end it here too.
@@ -572,6 +597,237 @@ function createComputerBridge({
     }
   }
 
+  // ── Deploys ──────────────────────────────────────────────────────────────
+  // One at a time, in the order they arrive: 1904 hands out a submission's apps in the order the person
+  // set, and a deploy they start here joins the same line.
+
+  const deployLine = [];
+  let deployRunning = false;
+  const reportDeploy = (update, options = {}) => report(update, { ...options, pathname: deployPolicy.DEPLOYS_PATH });
+
+  /** Ends a deploy that never ran, here and (unless the person started it here) on 1904. */
+  function endDeploy(request, entry, status, message, { retry = active } = {}) {
+    close(entry, status, { message });
+    // A dry run that could not even start still answers the window that is waiting for it.
+    if (request.dryRun) onNotice({ kind: 'dry-run-finished', request, status: 'failed', output: message });
+    if (request.local) return Promise.resolve(true);
+    // 1904 hears at once, so the next deploy is not held behind one that will never run. `expired` is its own word for
+    // its own deadline; a prompt nobody answered here goes back as cancelled.
+    const reported = status === 'declined' ? 'declined' : status === 'cancelled' || status === 'expired' ? 'cancelled' : 'failed';
+    return track(reportDeploy(deployPolicy.deployUpdate({ deployId: request.id, status: reported, message }), { retry }));
+  }
+
+  /**
+   * ssh for a host the person filled in: started by this app itself, every argument its own word, with the host's
+   * pinned identity and the one secret this run needs written into (or handed through) the run's own temp folder,
+   * which is deleted afterwards. Resolves `{ plan, env }`, or `{ error, cancelled? }` when it cannot start.
+   */
+  async function prepareHostRun(recipe, request, tempDir, word) {
+    const p = platform === 'windows' ? path.win32 : path.posix;
+    const file = deploySsh.sshProgram('ssh', { platform, env, exists });
+    if (!file) return { error: 'This computer has no ssh program. Install OpenSSH, then try again.' };
+    const { host } = recipe;
+    const files = {};
+    const secretEnv = {};
+    const pairedId = link.info()?.id;
+    if (host.auth !== 'ssh') {
+      files.knownHosts = p.join(tempDir, 'known_hosts');
+      await fs.writeFile(files.knownHosts, host.keys.join('\n') + '\n', { mode: 0o600 });
+    }
+    if (host.auth === 'key') {
+      const key = await deploySecrets?.privateKey(request.app.id, pairedId);
+      if (!key) return { error: 'This app’s deploy key is not on this computer anymore. Open Deploy From This Computer and create it again.' };
+      files.key = p.join(tempDir, 'key');
+      await fs.writeFile(files.key, key.endsWith('\n') ? key : key + '\n', { mode: 0o600 });
+    } else if (host.auth === 'password-saved' || host.auth === 'password-ask') {
+      const password = deploySsh.cleanPassword(host.auth === 'password-saved'
+        ? await deploySecrets?.password(request.app.id, pairedId)
+        : await askSecret({ request, host }).catch(() => undefined));
+      if (!password) {
+        return host.auth === 'password-saved'
+          ? { error: 'The password saved for this host is not on this computer anymore. Open Deploy From This Computer and enter it again.' }
+          : { cancelled: true, error: 'No password was entered on this computer, so this deploy did not run.' };
+      }
+      const helper = deploySsh.askpass({ platform });
+      const helperFile = p.join(tempDir, helper.name);
+      await fs.writeFile(helperFile, helper.text, { mode: helper.mode ?? 0o600 });
+      Object.assign(secretEnv, deploySsh.passwordEnvironment({ helper: helperFile, password, env }));
+    }
+    return { plan: { file, args: deploySsh.sshArgs({ host, files, word }), detached: platform !== 'windows', clixml: false, shellFile: file }, env: secretEnv };
+  }
+
+  async function executeDeploy(request, entry, recipe) {
+    Object.assign(entry, { outside: false, status: 'starting', network: true });
+    onChange();
+    let tempDir;
+    try {
+      tempDir = await fs.realpath(await fs.mkdtemp((platform === 'windows' ? path.win32 : path.posix).join(tmpRoot, '1904-deploy-')));
+    } catch (error) {
+      return endDeploy(request, entry, 'failed', `Could not create a temporary folder for this deploy: ${error.code || error.message}`);
+    }
+    try {
+      // Commands for a host run there, so they start in this run's own temp folder and need nothing of the app on this
+      // computer. Commands for this computer start in the app's folder, like any other command.
+      let place = { root: tempDir, path: tempDir };
+      if (!deployPolicy.isRemote(recipe)) {
+        place = describe(request);
+        const problem = await prepareFolder(place);
+        if (problem) return await endDeploy(request, entry, 'failed', problem);
+      }
+      Object.assign(entry, { folder: place.root, cwd: place.path });
+      onChange();
+      const runNonce = nonce();
+      const built = deployPolicy.deployPlan({ recipe, platform, sha: request.sha, branch: request.branch, nonce: runNonce, dryRun: request.dryRun === true });
+      if (built.error) return await endDeploy(request, entry, 'failed', built.error);
+      const ownShell = policy.computerShell({ platform, env, exists });
+      let plan;
+      let secretEnv = {};
+      if (built.word) {
+        // A password typed for this deploy is asked for here, before 1904 is told the deploy is starting.
+        const prepared = await prepareHostRun(recipe, request, tempDir, built.word);
+        if (prepared.error) return await endDeploy(request, entry, prepared.cancelled ? 'cancelled' : 'failed', prepared.error);
+        ({ plan, env: secretEnv } = prepared);
+      } else {
+        plan = policy.commandPlan({ shell: built.shell ?? ownShell, command: built.command });
+        if (plan.error) return await endDeploy(request, entry, 'failed', plan.error);
+      }
+      const commandEnv = {
+        // ssh started directly still gets the person's real shell as SHELL: it is what ssh runs a ProxyCommand with.
+        ...policy.commandEnvironment({ platform, env, searchPath: await commandSearchPath(), tempDir, shellFile: built.word ? ownShell.file : plan.shellFile }),
+        ...deployPolicy.deployEnvironment({ platform, env, sha: request.sha, branch: request.branch }),
+        ...secretEnv,
+      };
+      if (!request.local) {
+        // Like a command: nothing starts until 1904 confirms the deploy is still wanted.
+        const confirmation = await confirmRunning(request, place.path, () => call(deployPolicy.DEPLOYS_PATH, { action: 'running', deployId: request.id }));
+        if (confirmation === 'withdrawn') return close(entry, 'withdrawn', { message: WITHDRAWN_BY_1904 });
+        if (confirmation === 'revoked') return close(entry, 'cancelled', { message: WITHDRAWN.disconnected });
+        // Paused or disconnected in that moment: it was taken back here, not a failure of the deploy.
+        if (confirmation === 'unconfirmed' && !active) return await endDeploy(request, entry, 'cancelled', link.paused() ? WITHDRAWN.paused : WITHDRAWN.disconnected, { retry: false });
+        if (confirmation === 'unconfirmed') return await endDeploy(request, entry, 'failed', UNCONFIRMED);
+        if (cancelledIds.has(request.id)) return await endDeploy(request, entry, 'cancelled', CANCELLED_DEPLOY, { retry: false });
+      }
+      const started = run({
+        plan, cwd: place.path, env: commandEnv, timeoutSeconds: request.timeoutSeconds,
+        platform, spawn, kill, clock, onOutput: (stream, text) => appendOutput(entry, stream, text),
+      });
+      handles.set(request.id, started);
+      if (started.pid) {
+        Object.assign(entry, { status: 'running', startedAt: clock.now() });
+        onChange();
+      }
+      const outcome = await started.done;
+      handles.delete(request.id);
+      const result = deployPolicy.deployOutcome({ outcome, marker: built.marker, nonce: runNonce });
+      // Computer Activity keeps how the commands themselves ended; 1904 hears whether the deploy counts as done.
+      close(entry, outcome.status, { exitCode: result.exitCode, message: result.message, durationMs: outcome.durationMs });
+      // A dry run deployed nothing, so it is not the app's last deploy.
+      if (!request.dryRun) { try { deploys.noteRun(request.app.id, { status: result.status, sha: request.sha, exitCode: result.exitCode }); } catch { /* a record only */ } }
+      onNotice({ kind: request.dryRun ? 'dry-run-finished' : 'deploy-finished', request, status: result.status, exitCode: result.exitCode, output: request.dryRun ? result.output : undefined });
+      if (!request.local) {
+        await reportDeploy(deployPolicy.deployUpdate({
+          deployId: request.id, status: result.status, exitCode: result.exitCode, output: result.output, stderr: outcome.stderr,
+          log: result.log, durationMs: outcome.durationMs, message: result.message,
+        }), { retry: active });
+      }
+    } finally {
+      removeTempDir(tempDir, { sandboxed: false });
+    }
+  }
+
+  async function handleDeploy({ request, entry }) {
+    try {
+      if (cancelledIds.has(request.id)) return close(entry, 'cancelled', { message: CANCELLED_DEPLOY });
+      if (entry.deadline <= clock.now()) return close(entry, 'expired');
+      // The commands as they are saved now: an edit made while this waited in line is what is shown and run.
+      const recipe = deploys.get(request.app.id, link.info()?.id);
+      if (!recipe) return await endDeploy(request, entry, 'failed', deployPolicy.NO_RECIPE);
+      request.command = deployPolicy.recipeText(recipe);
+      entry.command = request.command;
+      if (request.local) {
+        entry.approval = request.dryRun ? 'dry-run' : 'manual';
+      } else if (recipe.noApproval) {
+        entry.approval = 'deploy-auto';
+        onNotice({ kind: 'deploy-run', request });
+      } else {
+        // What the prompt cannot show in full is never asked about, and never run.
+        if (!promptFits(request.command)) return await endDeploy(request, entry, 'failed', TOO_LONG);
+        // An unanswered deploy prompt closes well before 1904's own deadline, so it never holds other prompts for hours.
+        const { decision } = await approvals.enqueue(request, { deadline: Math.min(entry.deadline, clock.now() + deployPolicy.DEPLOY_PROMPT_MS) });
+        if (decision === 'decline') return await endDeploy(request, entry, 'declined', DECLINED);
+        if (decision === 'expired') {
+          return await endDeploy(request, entry, 'expired', `Nobody answered the deploy prompt on this computer within ${Math.round(deployPolicy.DEPLOY_PROMPT_MS / 60_000)} minutes.`);
+        }
+        if (WITHDRAWN[decision]) return await endDeploy(request, entry, 'cancelled', WITHDRAWN[decision], { retry: false });
+        if (!['once', 'allow', 'task'].includes(decision)) return close(entry, 'cancelled', { message: CANCELLED_DEPLOY });
+        entry.approval = 'once';
+      }
+      await executeDeploy(request, entry, recipe);
+    } catch (error) {
+      console.warn('1904 Desktop could not finish a deploy:', error?.message);
+      handles.delete(request.id);
+      if (inProgress(entry)) close(entry, 'failed', { message: 'Something went wrong on this computer.' });
+    }
+  }
+
+  function pumpDeploys() {
+    if (deployRunning) return;
+    const item = deployLine.shift();
+    if (!item) return;
+    deployRunning = true;
+    track(handleDeploy(item).finally(() => {
+      deployRunning = false;
+      onChange();
+      pumpDeploys();
+    }));
+  }
+
+  function enqueueDeploy(deploy, recipe) {
+    // The app is named the way the person saw it when they saved its commands, not as this request names it.
+    const request = deployPolicy.deployRequest({ ...deploy, app: { ...deploy.app, name: recipe.appName || deploy.app.name, repo: recipe.repo || deploy.app.repo } }, recipe);
+    apps.set(request.app.id, request.app);
+    const entry = addEntry(request);
+    deployLine.push({ request, entry });
+    pumpDeploys();
+    return request.id;
+  }
+
+  /** Takes one deploy from a poll. Returns true when it was new. */
+  function acceptDeploy(raw) {
+    if (!deploys) return false;
+    const checked = deployPolicy.validateDeploy(raw);
+    const id = checked.ok ? checked.deploy.id : checked.id;
+    if (!id || known.has(id)) return false;
+    boundedAdd(known, id);
+    if (cancelledIds.has(id)) return false;
+    const refuseDeploy = message => {
+      track(reportDeploy(deployPolicy.deployUpdate({ deployId: id, status: 'failed', message })));
+      return true;
+    };
+    if (!checked.ok) return refuseDeploy(checked.reason);
+    // The only thing that lets a deploy in: commands the person saved on this computer, for this app, under this pairing.
+    const recipe = deploys.get(checked.deploy.app.id, link.info()?.id);
+    if (!recipe) return refuseDeploy(deployPolicy.NO_RECIPE);
+    enqueueDeploy(checked.deploy, recipe);
+    return true;
+  }
+
+  /** 1904 took a deploy back: one still in line leaves it at once. */
+  function cancelDeploy(id) {
+    const at = deployLine.findIndex(item => item.request.id === id);
+    if (at !== -1) {
+      const [item] = deployLine.splice(at, 1);
+      close(item.entry, 'cancelled', { message: CANCELLED_DEPLOY });
+    }
+    cancel(id, 'cancelled');
+  }
+
+  /** Pause, Disconnect and Quit: nothing still in line starts. */
+  function dropWaitingDeploys(reason) {
+    // endDeploy tracks its report, so Quit waits for 1904 to hear before the app goes.
+    for (const { request, entry } of deployLine.splice(0)) void endDeploy(request, entry, 'cancelled', WITHDRAWN[reason] ?? CANCELLED_DEPLOY, { retry: false });
+  }
+
   /** Whether this computer may answer the request at all: its own message, or its own away mode. */
   function originAllows(request) {
     if (request.origin?.kind === 'desktop') {
@@ -670,8 +926,10 @@ function createComputerBridge({
     setStatus(answer.enabled ? 'connected' : 'disabled', answer.enabled ? undefined : answer.message);
     for (const id of answer.awayEnded) endAway(id, { tellServer: false, reason: 'elsewhere' });
     for (const id of answer.cancelled) cancel(id, 'cancelled');
+    for (const id of answer.deploysCancelled) cancelDeploy(id);
     let fresh = 0;
     if (answer.enabled) for (const raw of answer.requests) if (accept(raw)) fresh++;
+    if (answer.enabled) for (const raw of answer.deploys) if (acceptDeploy(raw)) fresh++;
     onChange();
     return fresh;
   }
@@ -730,6 +988,7 @@ function createComputerBridge({
   }
 
   function stopEverything(reason) {
+    dropWaitingDeploys(reason);
     approvals.cancelAll(reason);
     for (const started of handles.values()) started.stop(reason);
   }
@@ -740,6 +999,8 @@ function createComputerBridge({
     leases.endAll();
     scheduleAwayEnd();
     messages.clear();
+    // Saved deploy commands stay for the person to see, but none may run without asking after a disconnect.
+    try { deploys?.disarm(); } catch { /* they cannot run under another pairing anyway */ }
     link.forget();
   }
 
@@ -770,7 +1031,7 @@ function createComputerBridge({
 
   function visibleRun(entry) {
     return {
-      id: entry.id,
+      id: entry.id, kind: entry.kind === 'deploy' ? 'deploy' : 'run',
       task: { id: entry.task?.id, title: policy.visibleLine(entry.task?.title) },
       sender: { id: entry.sender?.id, name: policy.visibleLine(entry.sender?.name) },
       app: { id: entry.app?.id, name: policy.visibleLine(entry.app?.name) },
@@ -809,6 +1070,7 @@ function createComputerBridge({
       link.setPaused(paused);
       if (paused) {
         halt('paused');
+        dropWaitingDeploys('paused');
         approvals.cancelAll('paused');
         // Pause takes back every allowance: after Resume, commands ask again.
         clearAllowances();
@@ -857,13 +1119,33 @@ function createComputerBridge({
       await settleWithin(SHUTDOWN_WAIT_MS);
     },
     busy() {
-      return handles.size > 0 || Boolean(approvals.openId()) || approvals.waitingIds().length > 0 ||
+      return handles.size > 0 || deployRunning || deployLine.length > 0 || Boolean(approvals.openId()) || approvals.waitingIds().length > 0 ||
         [...entries.values()].some(entry => entry.status === 'starting');
     },
     running() {
       return [...entries.values()].filter(entry => entry.status === 'running').length;
     },
     connection,
+    /**
+     * The person pressed Run now for an app's saved commands, in 1904 Desktop's own deploy window: that
+     * click is the approval. It waits in the same line as deploys from 1904 and tells 1904 nothing.
+     */
+    runDeployNow(appId, { dryRun = false } = {}) {
+      const recipe = deploys?.get(appId, link.info()?.id);
+      if (!recipe) return { ok: false, message: deployPolicy.NO_RECIPE };
+      // A second click, or a deploy from 1904 already under way, does not queue the same app twice.
+      if ([...entries.values()].some(entry => entry.kind === 'deploy' && entry.app?.id === appId && inProgress(entry))) {
+        return { ok: false, message: 'This app is already deploying. Computer Activity shows it.' };
+      }
+      const now = clock.now();
+      const id = enqueueDeploy({
+        id: `local_${nonce()}`, kind: 'deploy', local: true, dryRun: dryRun === true, app: { id: appId, name: recipe.appName, repo: recipe.repo },
+        sha: '', branch: '', taskId: '', sender: { id: 'self', name: 'You' }, createdAt: now, expiresAt: now + LOCAL_DEPLOY_WAIT_MS,
+      }, recipe);
+      return { ok: true, id };
+    },
+    /** Authenticated calls for the deploy window: the apps 1904 lists, and telling 1904 a recipe was saved or removed. */
+    deployCall(payload, options) { return call(deployPolicy.DEPLOYS_PATH, payload, options); },
     apps() { return [...apps.values()]; },
     away() {
       return leases.list().map(lease => ({ ...lease, taskTitle: policy.visibleLine(lease.taskTitle), commandsLeft: lease.maxCommands - lease.used }));
@@ -921,5 +1203,5 @@ function createComputerBridge({
 
 module.exports = {
   POLL_PATH, RESULT_PATH, POLL_TIMEOUT_MS, QUICK_ANSWER_MS, DISABLED_WAIT_MS, BLOCKED_WAIT_MS, RESULT_ATTEMPTS,
-  RUNNING_ATTEMPTS, WITHDRAWN_BY_1904, UNCONFIRMED, NO_SANDBOX, createComputerBridge,
+  RUNNING_ATTEMPTS, WITHDRAWN_BY_1904, UNCONFIRMED, NO_SANDBOX, CANCELLED_DEPLOY, LOCAL_DEPLOY_WAIT_MS, createComputerBridge,
 };

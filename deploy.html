@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'">
+  <title>Deploy From This Computer</title>
+  <style>
+    :root { color-scheme: dark; --canvas: #121416; --panel: #181b1e; --text: #e2e7ec; --muted: #9aa5b0; --line: #ffffff18;
+      --hover: #ffffff14; --edge: #ffffff38; --code: #0b0d0f; --run: #5cc489; --wait: #d9a441; --bad: #e5706b; --focus: #7ab7ff; }
+    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --panel: #ffffff; --text: #20262d; --muted: #59636e; --line: #00000016;
+      --hover: #0000000c; --edge: #00000030; --code: #eef1f4; --run: #1f7a46; --wait: #8a5d00; --bad: #b42318; --focus: #0b62d6; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--text); font: 400 13px/1.45 system-ui, sans-serif; }
+    header { position: sticky; top: 0; z-index: 1; padding: 14px 18px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+    #connection { margin: 4px 0 0; color: var(--muted); }
+    main { padding: 4px 18px 24px; max-width: 760px; }
+    h2 { margin: 18px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+    .hint { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    [hidden] { display: none !important; }
+    .field { display: block; margin: 12px 0 0; }
+    .field > span:first-child, legend { display: block; margin: 0 0 4px; padding: 0; font-weight: 600; }
+    input[type="text"], input[type="password"], input[type="number"], textarea, select { width: 100%; color: inherit; background: var(--panel); border: 1px solid var(--edge);
+      border-radius: 6px; padding: 6px 8px; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    select { font: inherit; }
+    input[type="number"] { width: 72px; }
+    textarea { min-height: 150px; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4; }
+    fieldset { margin: 14px 0 0; padding: 0; border: 0; min-width: 0; }
+    .choice { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; align-items: start; margin: 6px 0 0; }
+    .choice input { margin: 3px 0 0; }
+    .choice .hint { grid-column: 2; margin: 0; }
+    .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+    .row .field { flex: 0 1 170px; }
+    .row .grow { flex: 1 1 220px; min-width: 0; }
+    .row button { flex: none; }
+    .row .narrow { flex: 0 0 84px; }
+    .row .narrow input { width: 100%; }
+    .box { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .box .field:first-child { margin-top: 0; }
+    .box-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .box-title { font-weight: 600; }
+    .prints { margin: 6px 0 0; gap: 4px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+    #trust-host { margin-top: 8px; }
+    pre { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--code); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; }
+    button.link { border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; color: inherit; font: inherit; }
+    .order { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; flex-wrap: wrap; }
+    .actions { display: flex; align-items: center; gap: 8px; margin: 18px 0 0; flex-wrap: wrap; }
+    .actions .spacer { flex: 1; }
+    #status { margin: 10px 0 0; min-height: 1.45em; }
+    #status[data-kind="error"] { color: var(--bad); }
+    #status[data-kind="ok"] { color: var(--run); }
+    .warn { margin: 10px 0 0; padding: 8px 12px; border: 1px solid var(--wait); border-radius: 8px; background: var(--panel); }
+    ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    .saved { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 8px 12px; }
+    .saved-name { font-weight: 600; }
+    .saved-detail { flex: 1 1 240px; color: var(--muted); }
+    .saved[data-last="failed"] .saved-last, .saved[data-last="timeout"] .saved-last { color: var(--bad); }
+    .saved[data-last="done"] .saved-last { color: var(--run); }
+    button { font: 550 12px system-ui, sans-serif; color: inherit; background: transparent; border: 1px solid var(--edge); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+    button.primary { background: var(--text); color: var(--canvas); border-color: var(--text); }
+    button:hover:not(:disabled), button:focus-visible { background: var(--hover); }
+    button.primary:hover:not(:disabled) { background: var(--text); opacity: .88; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+    button:disabled, fieldset:disabled { opacity: .5; cursor: default; }
+    @media (forced-colors: active) { .saved, .warn, input, textarea, select { border: 1px solid CanvasText; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Deploy From This Computer</h1>
+    <p id="connection" role="status"></p>
+  </header>
+  <main>
+    <p class="hint">Save the commands you use to deploy an app. When a change of yours to that app merges, 1904 asks this computer to run them.
+      1904 only says which app and which commit: the commands stay on this computer and only you can change them, here.</p>
+    <p class="warn" id="notice" hidden></p>
+    <form id="form" autocomplete="off">
+      <fieldset id="fields">
+        <label class="field"><span>App</span>
+          <select id="app"></select>
+        </label>
+        <p class="hint" id="apps-empty" hidden>No apps to show yet. Apps you can work on in 1904 appear here.</p>
+        <fieldset>
+          <legend>Where the commands run</legend>
+          <label class="choice"><input type="radio" name="where" value="host" checked><span>On a host, over SSH</span></label>
+          <label class="choice"><input type="radio" name="where" value="custom"><span>Through a connect command I type</span></label>
+          <label class="choice"><input type="radio" name="where" value="local"><span>On this computer</span></label>
+        </fieldset>
+        <div id="host-fields">
+          <div class="row">
+            <label class="field grow"><span>Host</span>
+              <input type="text" id="host-name" spellcheck="false" autocapitalize="off" placeholder="deploy.example.com">
+            </label>
+            <label class="field"><span>User name</span>
+              <input type="text" id="host-user" spellcheck="false" autocapitalize="off" placeholder="deploy">
+            </label>
+            <label class="field narrow"><span>Port</span>
+              <input type="number" id="host-port" min="1" max="65535" step="1" placeholder="22">
+            </label>
+          </div>
+          <label class="field"><span>Sign in with</span>
+            <select id="auth">
+              <option value="key">A deploy key 1904 Desktop makes (recommended)</option>
+              <option value="ssh">My own SSH setup: my keys, agent and SSH settings</option>
+              <option value="password-saved">A password, saved on this computer</option>
+              <option value="password-ask">A password I type at each deploy</option>
+            </select>
+          </label>
+          <p class="hint" id="auth-hint"></p>
+          <div class="box" id="identity-box">
+            <div class="box-head"><span class="box-title">Host identity</span><button type="button" id="check-host">Check host</button></div>
+            <p class="hint" id="identity-text"></p>
+            <ul class="prints" id="identity-keys"></ul>
+            <button type="button" id="trust-host" hidden>Trust this host</button>
+          </div>
+          <div class="box" id="key-box">
+            <div class="box-head"><span class="box-title">Deploy key</span><button type="button" id="make-key">Create deploy key</button></div>
+            <p class="hint" id="key-text"></p>
+            <div id="key-install" hidden>
+              <label class="field"><span>Add it on the host with your password, typed once and not saved</span>
+                <span class="row"><input type="password" id="install-password" class="grow" autocomplete="off" spellcheck="false" placeholder="Password for the host">
+                  <button type="button" id="install-key">Add key</button></span>
+              </label>
+              <p class="hint">Or add it yourself: run this on the host as that user. <button type="button" class="link" id="copy-install">Copy the command</button></p>
+              <pre id="install-command"></pre>
+            </div>
+          </div>
+          <div class="box" id="password-box">
+            <label class="field"><span>Password</span>
+              <input type="password" id="host-password" autocomplete="off" spellcheck="false">
+            </label>
+            <p class="hint">Kept encrypted with this computer’s secure storage, and used only to sign in to this host when this app deploys.</p>
+          </div>
+        </div>
+        <div id="custom-fields" hidden>
+          <label class="field"><span>How to connect</span>
+            <input type="text" id="connect" spellcheck="false" autocapitalize="off" placeholder="ssh deploy@your-host">
+          </label>
+          <p class="hint">A command that reaches the host and runs what is given to it, such as ssh with a host from your SSH settings. It must work without typing anything.</p>
+        </div>
+        <label class="field"><span>Commands</span>
+          <textarea id="commands" spellcheck="false" autocapitalize="off" placeholder="cd /srv/my-app&#10;git pull --ff-only&#10;npm ci&#10;npm run build"></textarea>
+        </label>
+        <p class="hint">One per line, run in order. The deploy stops at the first command that fails. DEPLOY_SHA and DEPLOY_BRANCH hold the merged commit and its branch.
+          Dry run checks them on the host without running any.</p>
+        <p class="hint" id="local-note" hidden>On this computer, PowerShell runs these. In PowerShell 7.4 or later a program that fails stops the deploy;
+          in Windows PowerShell 5 only a failed cmdlet does, so end with your own check there.</p>
+        <fieldset>
+          <legend>Log</legend>
+          <label class="choice"><input type="radio" name="log" value="output" checked><span>What the commands print</span></label>
+          <label class="choice"><input type="radio" name="log" value="file"><span>A log file the commands write on the host</span>
+            <span class="hint">After the commands finish, the end of that file is read back.</span></label>
+          <label class="choice"><input type="radio" name="log" value="write"><span>Write a log file on the host</span>
+            <span class="hint">Everything the commands print is added to that file and its end is read back. The file is tried first: if it cannot be written, the commands still run, without it.</span></label>
+          <label class="field" id="log-path-row" hidden><span>Log file on the host</span>
+            <input type="text" id="log-path" spellcheck="false" autocapitalize="off" placeholder="/var/log/my-app/deploy.log">
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>When it runs</legend>
+          <label class="choice"><input type="checkbox" id="auto" checked><span>Deploy when a change of mine merges</span>
+            <span class="hint">Off: this app deploys only when you choose Deploy now in 1904 or Run now here.</span></label>
+          <label class="choice"><input type="checkbox" id="no-approval"><span>Submit without approval</span>
+            <span class="hint">These commands run without a prompt on this computer. You are asked once now, and again whenever you change them.</span></label>
+          <div class="order">
+            <label for="position">Deploy order</label>
+            <input type="number" id="position" min="1" max="99" step="1" value="10">
+            <span class="hint">When several apps change together, lower numbers deploy first, one at a time.</span>
+          </div>
+          <label class="choice"><input type="checkbox" id="stop-on-failure"><span>If this deploy fails, skip the apps after it</span></label>
+        </fieldset>
+      </fieldset>
+      <div class="actions">
+        <button type="button" class="primary" id="save">Save</button>
+        <button type="button" id="dry-run">Dry run</button>
+        <button type="button" id="run">Run now</button>
+        <span class="spacer"></span>
+        <button type="button" id="remove">Remove</button>
+      </div>
+      <p id="status" role="status" aria-live="polite"></p>
+      <pre id="dry-output" hidden tabindex="0" aria-label="What the dry run found"></pre>
+    </form>
+    <section aria-labelledby="saved-title">
+      <h2 id="saved-title">Apps that deploy from this computer</h2>
+      <p class="hint" id="saved-empty">None yet.</p>
+      <ul id="saved"></ul>
+    </section>
+  </main>
+</body>
+</html>

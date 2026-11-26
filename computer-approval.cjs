@@ -11,6 +11,8 @@ const PROMPT_COMMAND_LINES = 60;
 const TOO_LONG = '1904 Desktop did not ask: this command is too long to review in one prompt. Put it in a script file and run that, or split it.';
 const FULL_ACCESS = 'This command runs without the sandbox, with access to all your files and keys.';
 const NO_SANDBOX_HERE = '1904 Desktop has no sandbox on Windows yet, so every command here runs this way.';
+const DEPLOY_ACCESS = 'These are the deploy commands you saved on this computer. They run as you, with access to your files and keys.';
+const DEPLOY_ONCE = 'To stop being asked for this app, turn on “Submit without approval” for it in Deploy From This Computer.';
 const SANDBOXED = 'It runs in a sandbox: it can change files only in the app’s folder and can’t read your keys, your personal folders or 1904 Desktop’s data.';
 /** "Allow for this task" starts at this many minutes unless the person picks another length. */
 const TASK_ALLOWANCE_DEFAULT = 60;
@@ -35,6 +37,9 @@ function minutesText(minutes) {
  * task asks from messages sent from this computer, for a length the person picks. A command that
  * starts outside the app's folder, or that asks a Mac for full access, can only be run once.
  * Throws for a command that does not fit (promptFits): those are never asked about.
+ *
+ * A deploy (`request.kind === 'deploy'`) shows the commands the person saved here for that app, and can
+ * only be run once from a prompt: running without asking is that app's own setting, never a prompt's.
  */
 function approvalView({ request, computerName, place, full = false, platform, away = false }) {
   if (!promptFits(request.command)) throw new Error(TOO_LONG);
@@ -49,8 +54,9 @@ function approvalView({ request, computerName, place, full = false, platform, aw
     const found = unusualCharacters(text);
     return found.length ? [`In ${where}: ${found.join(', ')}`] : [];
   });
+  const deploy = request.kind === 'deploy';
   const network = !full && request.network === true;
-  const covers = !place.outside && (!full || unsandboxed);
+  const covers = !deploy && !place.outside && (!full || unsandboxed);
   const scopes = [
     { id: 'once', label: 'Only this command' },
     ...(covers ? [
@@ -64,17 +70,18 @@ function approvalView({ request, computerName, place, full = false, platform, aw
     ] : []),
   ];
   return {
-    title: 'Use My Computer',
-    heading: `Run a command on ${visibleLine(computerName)}?`,
+    title: deploy ? 'Deploy From This Computer' : 'Use My Computer',
+    heading: deploy ? `Deploy ${visibleLine(request.app.name)} from ${visibleLine(computerName)}?` : `Run a command on ${visibleLine(computerName)}?`,
     fields: fields.map(([name, text]) => ({ name, text: visibleLine(text) })),
     command: visibleText(request.command),
     folder: place.outside
       ? { path: visibleLine(place.path), outside: true, root: visibleLine(place.root) }
       : { path: visibleLine(place.path), outside: false },
-    reason: visibleLine(request.reason) || '',
+    // The prompt labels this line as the agent's. A deploy has no agent behind it: why it runs is a note of 1904 Desktop's own.
+    reason: deploy ? '' : visibleLine(request.reason) || '',
     unusual,
     access: full ? 'full' : 'sandbox',
-    notes: full
+    notes: deploy ? [...(request.reason ? [visibleLine(request.reason)] : []), DEPLOY_ACCESS, DEPLOY_ONCE] : full
       ? [FULL_ACCESS, ...(unsandboxed ? [NO_SANDBOX_HERE] : [])]
       : [SANDBOXED, network ? 'The agent asks for internet access for this command.' : 'It has no internet access.'],
     network,
@@ -82,7 +89,7 @@ function approvalView({ request, computerName, place, full = false, platform, aw
     minutes: TASK_ALLOWANCE_MINUTES.map(value => ({ value, label: minutesText(value) })),
     defaultMinutes: TASK_ALLOWANCE_DEFAULT,
     away: away && !full && !place.outside,
-    run: full ? 'Run with full access' : 'Run',
+    run: deploy ? 'Deploy' : full ? 'Run with full access' : 'Run',
   };
 }
 
@@ -223,6 +230,6 @@ function createApprovalQueue({ ask, precheck = () => undefined, onAnswer = () =>
 }
 
 module.exports = {
-  PROMPT_COMMAND_MAX, PROMPT_COMMAND_LINES, TOO_LONG, FULL_ACCESS, NO_SANDBOX_HERE, TASK_ALLOWANCE_DEFAULT,
+  PROMPT_COMMAND_MAX, PROMPT_COMMAND_LINES, TOO_LONG, FULL_ACCESS, NO_SANDBOX_HERE, DEPLOY_ACCESS, DEPLOY_ONCE, TASK_ALLOWANCE_DEFAULT,
   promptFits, approvalView, createPromptAsk, createApprovalQueue,
 };

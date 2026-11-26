@@ -91,6 +91,8 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
         taskId: task?.taskId, appId: task?.appId, taskTitle: task?.taskTitle,
       }),
       showActivity: () => ipcRenderer.send('1904:computer-activity'),
+      // Opens 1904 Desktop's own window for an app's deploy commands. The page cannot read or change them.
+      deploys: () => ipcRenderer.send('1904:computer-deploys'),
     },
     // Non-sensitive OS and hardware model only, read by the dashboard only when the person enabled
     // opt-in product usage tracking in Settings → General.

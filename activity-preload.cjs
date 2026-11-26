@@ -54,6 +54,9 @@ function approvalLine(run) {
   if (run.approval === 'away') return 'Ran in away mode, without asking.';
   if (run.approval === 'task') return 'You allowed it, and this task’s later commands for the time you picked.';
   if (run.approval === 'task-covered') return 'Allowed for this task, so it ran without asking.';
+  if (run.approval === 'deploy-auto') return 'Ran without asking: you turned on “Submit without approval” for this app’s deploy.';
+  if (run.approval === 'manual') return 'You started it with Run now.';
+  if (run.approval === 'dry-run') return 'A dry run you started: it checked the commands and ran none of them.';
   return '';
 }
 
@@ -128,7 +131,7 @@ function updateCard(card, run) {
   card.command.textContent = run.command;
   card.where.textContent = run.outside ? `Starts outside the app’s folder, in ${run.cwd}` : `Folder: ${run.cwd}`;
   card.where.classList.toggle('outside', Boolean(run.outside));
-  card.reason.textContent = run.reason ? `The agent says: “${run.reason}”` : '';
+  card.reason.textContent = !run.reason ? '' : run.kind === 'deploy' ? run.reason : `The agent says: “${run.reason}”`;
   card.reason.hidden = !run.reason;
   const approved = approvalLine(run);
   card.approval.textContent = approved;

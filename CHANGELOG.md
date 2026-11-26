@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Deploy From This Computer** (1904 menu): save the commands you use to deploy an app, such as `ssh` to your host, `git pull` and your build. When a change of yours to that app merges, 1904 asks this computer to run them. 1904 only names the app and the commit; the commands stay on this computer and can be changed only in this window.
+- **No ssh command to type**: name the host, the user and the port, and choose how to sign in. The default is a **deploy key** 1904 Desktop makes for the app and keeps encrypted with your system’s secure storage; you add it on the host once, with your password typed once and not kept, or with a command you copy. You can instead use your own SSH setup, a password saved in secure storage, or a password you type at each deploy.
+- **Check host** shows the host’s identity before anything signs in. A deploy connects only to a host that shows exactly the identity you trusted.
+- **Dry run** checks a saved deploy on the host without running any command: the connection, the programs the commands start, that the commands parse, that sudo works without a password where they use it, the log file and free disk.
+- Each deploy asks first, with the whole command list in the prompt. Turn on **Submit without approval** for an app to let its saved commands run without asking; you confirm that once, and again whenever you change them. A deploy that runs without asking is announced with a notification.
+- Deploys run one at a time. Give each app a deploy order for changes that land together, and choose whether a failed deploy skips the apps after it.
+- A deploy’s log can be what the commands print, a log file the commands write on the host, or a log file 1904 Desktop writes there. The commands always run exactly as written and keep their own exit status; a log that cannot be written is skipped.
+- **Run now** starts an app’s saved commands from the window, once the form shows exactly what is saved. Every deploy shows in Computer Activity with its output and a Stop button.
+- A deploy prompt nobody answers closes after 30 minutes, so it never holds other prompts for hours.
+- Pause stops deploys from 1904 too, and Disconnect turns “Submit without approval” off for every app.
+
 ## 0.4.0
 
 - **Use My Computer**: a task’s agent can ask to run a command on this computer, and you decide here. It stays off until you choose **1904 → Use My Computer…** and confirm; the prompt names the 1904 account the computer joins, and Cancel takes the connection back at once.
