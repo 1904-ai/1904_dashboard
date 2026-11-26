@@ -26,7 +26,7 @@ const {
 const { installScreenCapture } = require('./screen-capture.cjs');
 const { installSnippetCapture } = require('./snippet-capture.cjs');
 const computerPolicy = require('./computer-policy.cjs');
-const { connectPrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
+const { connectPrompt, resumePrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
 const { createDesktopBrowserBridge } = require('./browser-bridge.cjs');
 const { createDeviceInfoReader } = require('./device-info.cjs');
 const readDeviceInfo = createDeviceInfoReader();
@@ -110,6 +110,7 @@ let computerLink;
 let computerBridge;
 let desktopBrowserBridge;
 let computerConnecting;
+let computerResuming;
 let computerQuitting = false;
 let computerMenuKey;
 let activityWindow;
@@ -1346,11 +1347,12 @@ function isActivitySender(event) {
     event.senderFrame === event.sender.mainFrame && isActivityPage(event.senderFrame?.url);
 }
 
-// The pages that use Use My Computer: the agents dashboard and 1904 Settings → Computers. No other
-// 1904 page can reach it, so content 1904 might show on another page never can either.
+// The pages that use Use My Computer: the agents dashboard, and 1904 Settings → Computers and → 1904 Desktop.
+// No other 1904 page can reach it, so content 1904 might show on another page never can either.
+const COMPUTER_SETTINGS_PAGES = ['/settings/computers', '/settings/desktop'];
 function isComputerPage(href) {
   const url = webUrl(href);
-  return isTaskTitleBarPage(href) || (url?.origin === ORIGIN && url.pathname.replace(/\/$/, '') === '/settings/computers');
+  return isTaskTitleBarPage(href) || (url?.origin === ORIGIN && COMPUTER_SETTINGS_PAGES.includes(url.pathname.replace(/\/$/, '')));
 }
 
 function isComputerDashboardSender(event) {
@@ -2126,6 +2128,39 @@ function installComputerHandlers() {
     return connectComputer();
   });
   ipcMain.handle('1904:computer-away', (event, input) => isComputerDashboardSender(event) ? startAwayFromDashboard(input) : null);
+  // Pause from Settings → 1904 Desktop. Pausing only takes access away, so the page may do it at once. Turning
+  // Pause off lets requests in again, so that is the person's answer in a dialog of ours, and only right after
+  // they typed or clicked in the window with it in front.
+  ipcMain.handle('1904:computer-pause', (event, paused) => {
+    if (!isComputerDashboardSender(event)) return null;
+    if (typeof paused !== 'boolean' || !computerBridge || !computerLink.info() || paused === computerLink.paused()) return computerState();
+    if (paused) {
+      setComputerPaused(true);
+      return computerState();
+    }
+    if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) return computerState();
+    computerResuming ??= (async () => {
+      try {
+        const { response } = await messageBox(resumePrompt(computerLink.info()?.name), computerParent());
+        if (response === 1 && computerLink.info() && computerLink.paused()) setComputerPaused(false);
+      } catch (error) {
+        console.warn('1904 Desktop could not ask about resuming:', error?.message);
+      } finally {
+        computerResuming = undefined;
+      }
+      return computerState();
+    })();
+    return computerResuming;
+  });
+  // 1904 Desktop itself, for the same Settings page: its version and whether an update is waiting. The check is
+  // the one in the Help menu, and its answer is our own dialog; the page hears nothing back.
+  ipcMain.handle('1904:app-info', event => isComputerDashboardSender(event)
+    ? { version: app.getVersion(), updates: Boolean(menuUpdates), updateReady: Boolean(menuUpdates) && updateReady } : null);
+  ipcMain.on('1904:app-check-updates', (event) => {
+    if (!isComputerDashboardSender(event) || !menuUpdates) return;
+    if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) return;
+    void menuUpdates.check();
+  });
   ipcMain.on('1904:computer-activity', (event) => {
     if (isComputerDashboardSender(event)) showActivity();
   });
