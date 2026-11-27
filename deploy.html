@@ -98,7 +98,7 @@
     .output-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     pre { margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--code); border: 1px solid var(--line);
       font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
-    #key-manual pre, #suggest-box pre { margin-top: 8px; }
+    #key-manual pre, #suggest-box pre, #repo-url-box pre { margin-top: 8px; }
     .steps { list-style: none; margin: 0; padding: 4px 12px; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
     .steps li { display: grid; grid-template-columns: 18px 1fr; gap: 0 8px; align-items: baseline; padding: 7px 0; }
     .steps li + li { border-top: 1px solid var(--line); }
@@ -168,6 +168,11 @@
             <select id="app"></select>
           </label>
           <p class="hint" id="apps-empty" hidden>No apps to show yet. Apps you can work on in 1904 appear here.</p>
+          <div class="box" id="repo-url-box" hidden>
+            <div class="box-head"><span class="box-title">Repository URL</span><button type="button" id="copy-clone-url">Copy URL</button></div>
+            <pre id="repo-clone-url"></pre>
+            <p class="hint">For 1904-hosted repositories, create a read-only Git deploy token in the app’s Settings → Your code so this host can run <kbd>git pull</kbd>.</p>
+          </div>
           <fieldset>
             <legend>Where the commands run</legend>
             <label class="choice"><input type="radio" name="where" value="host" checked><span>On a host, over SSH</span></label>

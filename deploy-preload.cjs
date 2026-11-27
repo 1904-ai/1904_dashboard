@@ -48,6 +48,7 @@ function node(tag, className, text) {
 }
 
 const recipeFor = appId => state.recipes.find(recipe => recipe.appId === appId);
+const appFor = appId => state.apps.find(app => app.id === appId);
 const keptFor = appId => state.kept?.[appId] ?? { password: false, publicKey: '', installCommand: '' };
 const checked = name => document.querySelector(`input[name="${name}"]:checked`)?.value;
 const logMode = () => checked('log') || 'output';
@@ -255,6 +256,9 @@ function showParts() {
   $('local-note').hidden = !(place === 'local' && state.platform === 'windows');
 
   const kept = keptFor(selected);
+  const cloneUrl = appFor(selected)?.cloneUrl || '';
+  $('repo-url-box').hidden = !cloneUrl;
+  $('repo-clone-url').textContent = cloneUrl;
   const host = typedHost();
   const target = hostTarget(host);
   $('identity-text').textContent = trusted.length
@@ -845,6 +849,10 @@ window.addEventListener('DOMContentLoaded', () => {
     button.textContent = 'Copied to clipboard';
     button.dataset.copied = 'true';
     copyTimer = setTimeout(resetCopyNotice, 2500);
+  });
+  $('copy-clone-url').addEventListener('click', () => {
+    ipcRenderer.send('1904:deploy-copy-clone-url', selected);
+    say('Copied the repository URL.', 'ok');
   });
   $('save').addEventListener('click', async () => {
     say('Saving…');
