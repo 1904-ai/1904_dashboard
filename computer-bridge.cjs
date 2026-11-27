@@ -50,9 +50,9 @@ const HISTORY_SHOWN = 100;
 const ACTIVITY_OUTPUT_MAX = 64 * 1024;
 
 const CONNECTION_TEXT = {
-  'not-connected': () => 'This computer isn’t connected to 1904. Open Settings → 1904 Desktop to connect it.',
-  revoked: () => 'This computer was disconnected from 1904. Open Settings → 1904 Desktop to connect it again.',
-  lapsed: () => 'This computer’s connection to 1904 lapsed after 30 days without use. Open Settings → 1904 Desktop to connect it again.',
+  'not-connected': () => 'This computer isn’t connected to 1904. Open Settings → Computers to connect it.',
+  revoked: () => 'This computer was disconnected from 1904. Open Settings → Computers to connect it again.',
+  lapsed: () => 'This computer’s connection to 1904 lapsed after 30 days without use. Open Settings → Computers to connect it again.',
   connecting: () => 'Connecting to 1904…',
   connected: name => `Connected to 1904 as ${name}. Nothing runs until you approve it on this computer or start away mode.`,
   offline: () => 'Can’t reach 1904. Trying again automatically.',
@@ -60,8 +60,8 @@ const CONNECTION_TEXT = {
   disabled: () => 'Use My Computer is turned off for your workspace.',
   blocked: () => '1904 isn’t sending commands to this computer for your account right now. Trying again every few minutes.',
   sleeping: () => 'Paused while this computer sleeps.',
-  paused: () => 'Use My Computer is paused on this computer. Turn off Pause in Settings → 1904 Desktop to take requests again.',
-  unreadable: () => 'This computer’s 1904 key could not be read. Disconnect this computer in Settings → 1904 Desktop, then connect it again.',
+  paused: () => 'Use My Computer is paused on this computer. Turn off Pause in Settings → Computers to take requests again.',
+  unreadable: () => 'This computer’s 1904 key could not be read. Disconnect this computer in Settings → Computers, then connect it again.',
   disconnecting: () => 'Disconnecting…',
 };
 

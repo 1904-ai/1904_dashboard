@@ -2143,7 +2143,7 @@ async function syncDeploys() {
 
 async function saveDeployRecipe(appId, input) {
   const info = computerLink?.info();
-  if (!computerBridge || !deployRecipes || !info) return { ok: false, error: 'Connect this computer first in Settings → 1904 Desktop.' };
+  if (!computerBridge || !deployRecipes || !info) return { ok: false, error: 'Connect this computer first in Settings → Computers.' };
   const appRef = deployApps.get(appId) ?? deployRecipes.all().find(recipe => recipe.appId === appId && recipe.computerId === info.id);
   if (!appRef) return { ok: false, error: 'Choose one of your apps.' };
   const checked = computerDeploy.cleanRecipe(input);

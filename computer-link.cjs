@@ -212,7 +212,7 @@ function connectPrompt(name, person) {
       'the folder and the agent’s reason first. Nothing runs unless you approve it here or start away mode, and only for ' +
       'messages you send from 1904 Desktop. Commands run in a sandbox where this computer has one; a command that needs ' +
       'full access runs as you, with your permissions, and always asks you here. You can pause or disconnect this computer ' +
-      'in Settings → 1904 Desktop, or disconnect it in 1904 Settings.',
+      'in Settings → Computers, or disconnect it in 1904 Settings.',
     buttons: ['Cancel', 'Connect'], defaultId: 0, cancelId: 0, noLink: true,
   };
 }

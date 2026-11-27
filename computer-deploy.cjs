@@ -53,7 +53,7 @@ const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 const FOLDER_ERROR = 'Name the app folder as a full path on the host, such as /srv/my-app or ~/my-app, without spaces or quotes.';
 const appKey = key => typeof key === 'string' && REF.test(key) && !['__proto__', 'constructor', 'prototype'].includes(key);
 
-const NO_RECIPE = 'This computer has no deploy commands saved for this app. Open Settings → 1904 Desktop → Deploy From This Computer.';
+const NO_RECIPE = 'This computer has no deploy commands saved for this app. Open Settings → Computers → Local deploys in 1904 Desktop.';
 const UNCONFIRMED_RUN = 'The commands did not report back from the host, so this deploy is not counted as done. Check that sh and base64 are available there.';
 
 /**
