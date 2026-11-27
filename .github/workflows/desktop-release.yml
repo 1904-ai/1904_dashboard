@@ -58,7 +58,7 @@ jobs:
           npm run release:build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run release:verify
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: 1904-desktop-win-x64
           path: release-output/win/x64/
@@ -106,7 +106,7 @@ jobs:
           printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$APPLE_API_KEY"
           npm run release:build
           npm run release:verify
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: 1904-desktop-mac-${{ matrix.arch }}
           path: release-output/mac/${{ matrix.arch }}/
@@ -137,7 +137,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: node --test test/release-assets.test.cjs
       - run: npm run release:assemble
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: 1904-github-release
           path: release-output/github/
