@@ -27,7 +27,7 @@ const { installScreenCapture } = require('./screen-capture.cjs');
 const { installSnippetCapture } = require('./snippet-capture.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, resumePrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
-const { createDesktopBrowserBridge } = require('./browser-bridge.cjs');
+const { createDesktopBrowserBridge, maskPairingCode } = require('./browser-bridge.cjs');
 const { createDeviceInfoReader } = require('./device-info.cjs');
 const readDeviceInfo = createDeviceInfoReader();
 const { createComputerBridge } = require('./computer-bridge.cjs');
@@ -52,6 +52,7 @@ const ACTIVITY_PAGE = path.join(__dirname, 'activity.html');
 const APPROVAL_PAGE = path.join(__dirname, 'approval.html');
 const DEPLOY_PAGE = path.join(__dirname, 'deploy.html');
 const SECRET_PAGE = path.join(__dirname, 'secret.html');
+const BROWSER_CONNECT_PAGE = path.join(__dirname, 'browser-connect.html');
 const TASK_NOTICE_PAGE = path.join(__dirname, 'task-notice.html');
 // The prompt takes no Run until it has been in front this long, and opens only after a pause in the
 // person's typing and clicking in the dashboard (or after the longest wait), so no key press or click
@@ -109,6 +110,9 @@ let updateReady = false;
 let computerLink;
 let computerBridge;
 let desktopBrowserBridge;
+let browserConnectWindow;
+let browserPairingCode;
+let browserExtensionFolder;
 let computerConnecting;
 let computerResuming;
 let computerQuitting = false;
@@ -501,6 +505,10 @@ function syncTitleBar() {
   }
   if (deployWindow && !deployWindow.isDestroyed()) {
     deployWindow.webContents.send('1904:deploy-theme', theme);
+  }
+  if (browserConnectWindow && !browserConnectWindow.isDestroyed()) {
+    browserConnectWindow.setBackgroundColor(palette.color);
+    browserConnectWindow.webContents.send('1904:browser-connect-theme', theme);
   }
   if (approvalWindow && !approvalWindow.isDestroyed()) {
     approvalWindow.setBackgroundColor(palette.color);
@@ -1708,25 +1716,89 @@ function startComputer() {
   computerBridge.start();
 }
 
+const BROWSER_EXTENSION_FILES = ['manifest.json', 'popup.html', 'popup.js', 'worker.js', 'README.txt'];
+const BROWSER_EXTENSIONS_URLS = new Set(['chrome://extensions', 'edge://extensions']);
+
+function isBrowserConnectPage(url) {
+  try {
+    const file = fileURLToPath(url);
+    return process.platform === 'win32' ? file.toLowerCase() === BROWSER_CONNECT_PAGE.toLowerCase() : file === BROWSER_CONNECT_PAGE;
+  } catch {
+    return false;
+  }
+}
+
+function isBrowserConnectSender(event) {
+  return Boolean(browserConnectWindow) && !browserConnectWindow.isDestroyed() && event.sender === browserConnectWindow.webContents &&
+    event.senderFrame === event.sender.mainFrame && isBrowserConnectPage(event.senderFrame?.url);
+}
+
+function browserConnectView() {
+  return {
+    theme: activeTheme(),
+    ...(desktopBrowserBridge ? desktopBrowserBridge.state() : { preference: 'auto', available: false, browser: 'Chrome / Edge' }),
+    codePreview: maskPairingCode(browserPairingCode),
+    folder: browserExtensionFolder || '',
+  };
+}
+
+function sendBrowserConnectState() {
+  if (browserConnectWindow && !browserConnectWindow.isDestroyed()) {
+    browserConnectWindow.webContents.send('1904:browser-connect-state', browserConnectView());
+  }
+}
+
+async function stageBrowserExtensionFolder() {
+  const folder = path.join(app.getPath('userData'), 'extensions', '1904-browser-extension');
+  await mkdir(folder, { recursive: true });
+  const bundled = await Promise.all(
+    BROWSER_EXTENSION_FILES.map(async name => [name, await readFile(path.join(app.getAppPath(), 'browser-extension', name))]),
+  );
+  for (const [name, content] of bundled) await writeFile(path.join(folder, name), content);
+  // Keep a previously loaded legacy folder up to date so Reload picks up the updated extension.
+  const legacy = path.join(app.getPath('userData'), 'browser-extension');
+  if (existsSync(legacy)) {
+    for (const [name, content] of bundled) await writeFile(path.join(legacy, name), content);
+  }
+  browserExtensionFolder = folder;
+  return folder;
+}
+
+function showBrowserConnect() {
+  if (browserConnectWindow && !browserConnectWindow.isDestroyed()) {
+    if (browserConnectWindow.isMinimized()) browserConnectWindow.restore();
+    browserConnectWindow.show();
+    browserConnectWindow.focus();
+    sendBrowserConnectState();
+    return browserConnectWindow;
+  }
+  const win = new BrowserWindow({
+    title: 'Connect your browser', icon: ICON, width: 580, height: 760, minWidth: 460, minHeight: 520,
+    backgroundColor: PALETTE[activeTheme()].color, autoHideMenuBar: true, show: false,
+    webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'browser-connect-preload.cjs') },
+  });
+  browserConnectWindow = win;
+  win.on('closed', () => { if (browserConnectWindow === win) browserConnectWindow = undefined; });
+  win.webContents.on('dom-ready', () => sendBrowserConnectState());
+  void win.loadFile(BROWSER_CONNECT_PAGE);
+  win.show();
+  return win;
+}
+
 function startDesktopBrowser() {
   desktopBrowserBridge = createDesktopBrowserBridge({
     file: path.join(app.getPath('userData'), 'browser-settings.json'), fetch: sessionFetch, origin: ORIGIN,
     confirm: async ({site}) => (await messageBox({type:'question',title:'Use your browser',message:'Share this browser tab with the task?',detail:`Website: ${site}\nOnly this selected tab is shared. Its page and screenshots go to the task; cookies stay on this computer. Browser actions still use the task’s approval controls.`,buttons:['Cancel','Share tab'],defaultId:0,cancelId:0,noLink:true},computerParent())).response === 1,
+    onChange: () => sendBrowserConnectState(),
   });
   powerMonitor.on('suspend', () => desktopBrowserBridge.pause());
   powerMonitor.on('resume', () => desktopBrowserBridge.resume());
   app.on('will-quit', () => desktopBrowserBridge.close());
 }
 async function setupDesktopBrowser() {
-  const code = await desktopBrowserBridge.setup();
-  const {response} = await messageBox({type:'info',title:'Connect your browser',message:'Connect Chrome or Edge',detail:'Load the 1904 browser extension, then open it on the tab you want to share. Paste a connection code from here and select Share this tab. You approve each task separately. Safari and Firefox are not supported yet.',buttons:['Cancel','Copy connection code','Open extension folder'],defaultId:0,cancelId:0,noLink:true},computerParent());
-  if(response===1)clipboard.writeText(code);
-  if(response===2){
-    const folder=path.join(app.getPath('userData'),'browser-extension');
-    await mkdir(folder,{recursive:true});
-    for(const name of ['manifest.json','popup.html','popup.js','worker.js'])await writeFile(path.join(folder,name),await require('node:fs/promises').readFile(path.join(app.getAppPath(),'browser-extension',name)));
-    await shell.openPath(folder);
-  }
+  browserPairingCode = await desktopBrowserBridge.setup();
+  await stageBrowserExtensionFolder();
+  showBrowserConnect();
   return desktopBrowserBridge.state();
 }
 function installDesktopBrowserHandlers() {
@@ -1749,6 +1821,32 @@ function installDesktopBrowserHandlers() {
   });
   ipcMain.handle('1904:browser-release', (event,input) => {
     if(isComputerDashboardSender(event))desktopBrowserBridge.release(input||{});
+  });
+  ipcMain.handle('1904:browser-connect-state', event => isBrowserConnectSender(event) ? browserConnectView() : null);
+  ipcMain.handle('1904:browser-connect-copy-code', async event => {
+    if (!isBrowserConnectSender(event)) return false;
+    browserPairingCode = await desktopBrowserBridge.setup();
+    clipboard.writeText(browserPairingCode);
+    sendBrowserConnectState();
+    return true;
+  });
+  ipcMain.handle('1904:browser-connect-open-folder', async event => {
+    if (!isBrowserConnectSender(event)) return false;
+    const folder = await stageBrowserExtensionFolder();
+    shell.showItemInFolder(folder);
+    sendBrowserConnectState();
+    return true;
+  });
+  ipcMain.handle('1904:browser-connect-copy-folder', async event => {
+    if (!isBrowserConnectSender(event)) return false;
+    const folder = browserExtensionFolder || await stageBrowserExtensionFolder();
+    clipboard.writeText(folder);
+    return true;
+  });
+  ipcMain.handle('1904:browser-connect-copy-url', (event, value) => {
+    if (!isBrowserConnectSender(event) || !BROWSER_EXTENSIONS_URLS.has(value)) return false;
+    clipboard.writeText(value);
+    return true;
   });
 }
 

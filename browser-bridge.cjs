@@ -8,23 +8,51 @@ const OPERATIONS = new Set(['attach','observe','navigate','target','action','inp
 const ID = /^[a-f0-9-]{36}$/;
 const TASK = /^[a-f0-9]{32}$/;
 const EXTENSION = /^chrome-extension:\/\/[a-p]{32}$/;
+const PAIRING_CODE = /^1904-([1-9]\d{0,4})-([a-f0-9]{64})$/;
 const MAX_BYTES = 300_000;
 function preference(value) { return PREFERENCES.has(value) ? value : 'auto'; }
+function formatPairingCode(port, token) {
+  if(!Number.isInteger(port)||port<1||port>65535||!/^[a-f0-9]{64}$/.test(String(token))) throw new Error('Invalid pairing code.');
+  return `1904-${port}-${token}`;
+}
+function maskPairingCode(code) {
+  const match = PAIRING_CODE.exec(String(code||'').trim());
+  return match ? `1904-${match[1]}-••••••••` : '';
+}
+function parsePairingCode(raw) {
+  const text = String(raw||'').trim();
+  const modern = PAIRING_CODE.exec(text);
+  if(modern){
+    const port = Number(modern[1]);
+    if(port>=1&&port<=65535) return {origin:`http://127.0.0.1:${port}`,key:modern[2],port};
+  }
+  try {
+    const url = new URL(text);
+    const port = Number(url.port);
+    if(url.protocol==='http:'&&!url.username&&!url.password&&url.pathname==='/'&&!url.search&&url.hostname==='127.0.0.1'&&Number.isInteger(port)&&port>=1&&port<=65535&&/^#([a-f0-9]{64})$/.test(url.hash)) {
+      return {origin:url.origin,key:url.hash.slice(1),port};
+    }
+  } catch {}
+  throw new Error('Paste the pairing code from 1904 Desktop (starts with 1904-).');
+}
 function taskPath(appId, taskId) {
   if(typeof appId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/.test(appId)||!TASK.test(taskId)) throw new Error('Invalid browser task.');
   return `/api/apps/${encodeURIComponent(appId)}/agent-workspaces`;
 }
 /** The renderer supplies IDs, never operations. Read the actual owner-only request from 1904. */
-function createDesktopBrowserBridge({file,fetch,origin,confirm,now=Date.now,serverFactory=createServer}) {
+function createDesktopBrowserBridge({file,fetch,origin,confirm,onChange,now=Date.now,serverFactory=createServer}) {
   let setting=preference(readState(file).preference),server,port,extensionOrigin,shared,lease,pending;
   let lastSeen=0,paused=false,releaseRequested=false,reshare=false;
   const token=randomBytes(32).toString('hex');
   const executed=new Map(),inFlight=new Set();
   function available() { return Boolean(shared&&now()-lastSeen<15_000); }
-  const state=()=>({preference:setting,available:available(),browser:shared?.browser||'Chrome / Edge'});
+  const state=()=>({preference:setting,available:available(),browser:shared?.browser||'Chrome / Edge',...(available()&&shared?.origin?{site:shared.origin}:{})});
+  function notify() { try { onChange?.(state()); } catch { /* listener errors must not break the bridge */ } }
   function end() {
+    const wasAvailable = Boolean(shared);
     if(pending){clearTimeout(pending.timer);pending.reject(new Error('Desktop browser disconnected.'));pending=undefined;}
     lease=undefined;shared=undefined;releaseRequested=true;
+    if(wasAvailable)notify();
   }
   async function readBody(req) {
     let bytes=0;const chunks=[];
@@ -44,7 +72,7 @@ function createDesktopBrowserBridge({file,fetch,origin,confirm,now=Date.now,serv
         const body=await readBody(req);extensionOrigin=requestOrigin;lastSeen=now();
         let answer={};
         if(req.url==='/share'){
-          end();shared={browser:body.browser==='Edge'?'Edge':'Chrome',origin:publicOrigin(body.url)};releaseRequested=false;reshare=false;
+          end();shared={browser:body.browser==='Edge'?'Edge':'Chrome',origin:publicOrigin(body.url)};releaseRequested=false;reshare=false;notify();
         } else if(req.url==='/poll') {
           // After sleep the extension is still paired: it shares the same tab again; each task still asks before using it.
           answer={request:pending&&!pending.sent?{id:pending.id,operation:pending.operation,payload:pending.payload,expiresAt:pending.expiresAt}:undefined,release:releaseRequested,...(reshare&&!paused?{reshare:true}:{})};
@@ -111,8 +139,8 @@ function createDesktopBrowserBridge({file,fetch,origin,confirm,now=Date.now,serv
       if(browser?.id!==input.session||browser.source!=='desktop'||browser.status!=='active'||browser.controller!=='user')throw new Error('Take control before opening the local tab.');
       await call({id:randomUUID(),operation:'focus',payload:{},expiresAt:now()+10_000});
     },
-    setPreference(value){if(!PREFERENCES.has(value))throw new Error('Choose a browser preference.');writeFileSync(file+'.tmp',JSON.stringify({preference:value}),{mode:0o600});renameSync(file+'.tmp',file);setting=value;return state();},
-    async setup(){await start();return `http://127.0.0.1:${port}/#${token}`;},
+    setPreference(value){if(!PREFERENCES.has(value))throw new Error('Choose a browser preference.');writeFileSync(file+'.tmp',JSON.stringify({preference:value}),{mode:0o600});renameSync(file+'.tmp',file);setting=value;notify();return state();},
+    async setup(){await start();return formatPairingCode(port,token);},
     release(input){if(lease&&lease.scope===input.appId+':'+input.taskId+':'+input.session)end();},
     resetLease(){if(lease||pending||shared)end();},
     pause(){paused=true;if(shared)reshare=true;end();},resume(){paused=false;},
@@ -124,4 +152,4 @@ function publicOrigin(raw) {
   if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.port&&!['80','443'].includes(url.port)||url.hostname==='localhost'||url.hostname.endsWith('.local')||url.hostname.endsWith('.localhost')||!url.hostname.includes('.')||/^(?:0|10|127|169\.254|192\.168|172\.(?:1[6-9]|2\d|3[01]))\./.test(url.hostname)||url.hostname.includes(':'))throw new Error('Share a public website tab.');
   return url.origin;
 }
-module.exports={createDesktopBrowserBridge,preference,taskPath,publicOrigin};
+module.exports={createDesktopBrowserBridge,preference,taskPath,publicOrigin,formatPairingCode,maskPairingCode,parsePairingCode};

@@ -1,8 +1,30 @@
 'use strict';
 let connection,tabId,site,attached=false,revision=0,looping=false,generation=0,executing=false,lastPoint={x:0,y:0};
+const PAIRING_CODE=/^1904-([1-9]\d{0,4})-([a-f0-9]{64})$/;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const cdp=(method,params={})=>chrome.debugger.sendCommand({tabId},method,params);
-function publicSite(raw){const u=new URL(raw);if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.port&&!['80','443'].includes(u.port)||!u.hostname.includes('.')||u.hostname==='localhost'||u.hostname.endsWith('.localhost')||u.hostname.endsWith('.local')||u.hostname.includes(':')||/^(0|10|127|169\.254|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(u.hostname))throw Error('Share a public website tab.');return u.origin;}
+function parsePairingCode(raw){
+  const text=String(raw||'').trim();
+  const modern=PAIRING_CODE.exec(text);
+  if(modern){
+    const port=Number(modern[1]);
+    if(port>=1&&port<=65535)return {origin:`http://127.0.0.1:${port}`,key:modern[2]};
+  }
+  try{
+    const url=new URL(text);
+    const port=Number(url.port);
+    if(url.protocol==='http:'&&!url.username&&!url.password&&url.pathname==='/'&&!url.search&&url.hostname==='127.0.0.1'&&Number.isInteger(port)&&port>=1&&port<=65535&&/^#([a-f0-9]{64})$/.test(url.hash)){
+      return {origin:url.origin,key:url.hash.slice(1)};
+    }
+  }catch{}
+  throw Error('Paste the pairing code from 1904 Desktop (starts with 1904-).');
+}
+function publicSite(raw){
+  let u;
+  try{u=new URL(raw);}catch{throw Error('Switch to a public website tab first (http:// or https://).');}
+  if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.port&&!['80','443'].includes(u.port)||!u.hostname.includes('.')||u.hostname==='localhost'||u.hostname.endsWith('.localhost')||u.hostname.endsWith('.local')||u.hostname.includes(':')||/^(0|10|127|169\.254|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(u.hostname))throw Error('Switch to a public website tab first (browser settings and local pages cannot be shared).');
+  return u.origin;
+}
 async function post(path,body){const r=await fetch(connection.origin+path,{method:'POST',headers:{'content-type':'application/json','x-1904-browser-key':connection.key},body:JSON.stringify(body),signal:AbortSignal.timeout(10_000)});if(!r.ok)throw Error('Desktop connection unavailable.');return r.json();}
 async function guard(){if(!connection||!Number.isInteger(tabId))throw Error('No tab shared.');const tab=await chrome.tabs.get(tabId);if(publicSite(tab.url)!==site)throw Error('The tab changed websites. Share it again.');if(!attached)throw Error('Sharing is paused.');}
 async function attach(){if(!attached){await chrome.debugger.attach({tabId},'1.3');attached=true;await cdp('Page.enable');await cdp('Page.setDownloadBehavior',{behavior:'deny'});await cdp('Fetch.enable',{patterns:[{resourceType:'Document',requestStage:'Request'}]});await cdp('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});}await guard();}
@@ -119,19 +141,29 @@ async function loop(){
     await sleep(500);
   }}finally{looping=false;if(connection&&mine!==generation)void loop();}
 }
+const USER_ERRORS=new Set([
+  'Choose a tab.',
+  'Paste the pairing code from 1904 Desktop (starts with 1904-).',
+  'Switch to a public website tab first (http:// or https://).',
+  'Switch to a public website tab first (browser settings and local pages cannot be shared).',
+]);
 chrome.runtime.onMessage.addListener((message,sender,reply)=>{
   if(sender.id!==chrome.runtime.id||!sender.url?.startsWith(chrome.runtime.getURL('popup.html')))return;
   void(async()=>{
+    if(message.operation==='status')return {ok:true,connected:Boolean(connection&&attached&&site),site:site||''};
     if(message.operation==='stop'){await stop();return {ok:true};}
     if(executing)return {ok:false,error:'A browser operation is settling. Stop sharing, then try again.'};
     if(message.operation!=='share'||!Number.isInteger(message.tabId))throw Error('Choose a tab.');
-    const code=new URL(message.code);
-    if(code.protocol!=='http:'||code.username||code.password||code.pathname!=='/'||code.search||code.hostname!=='127.0.0.1'||!/^#([a-f0-9]{64})$/.test(code.hash)||!code.port)throw Error('Copy the connection code from 1904 Desktop Settings.');
+    const parsed=parsePairingCode(message.code);
     const tab=await chrome.tabs.get(message.tabId),chosenSite=publicSite(tab.url);
-    await stop();connection={origin:code.origin,key:code.hash.slice(1)};tabId=message.tabId;site=chosenSite;revision=0;
+    await stop();connection={origin:parsed.origin,key:parsed.key};tabId=message.tabId;site=chosenSite;revision=0;
     await attach();await post('/share',{url:tab.url,browser:navigator.userAgent.includes('Edg/')?'Edge':'Chrome'});
-    await chrome.storage.session.set({connection:{...connection,tabId,site}});void loop();return {ok:true};
-  })().then(reply,async()=>{await stop();reply({ok:false,error:'Could not share this tab. Copy a fresh connection code from Desktop Settings.'});});return true;
+    await chrome.storage.session.set({connection:{...connection,tabId,site}});void loop();return {ok:true,site:chosenSite};
+  })().then(reply,async error=>{
+    const known=USER_ERRORS.has(error?.message)?error.message:'';
+    if(!known)await stop();
+    reply({ok:false,error:known||'Could not reach 1904 Desktop. Make sure 1904 Desktop is open and copy a fresh pairing code from Connect your browser.'});
+  });return true;
 });
 chrome.debugger.onEvent.addListener((source,method,params)=>{
   if(source.tabId!==tabId)return;
