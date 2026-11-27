@@ -1282,12 +1282,16 @@ function onComputerNotice(notice) {
       const combined = computerDeploy.formatDeployOutput({
         output: notice.output, stderr: notice.stderr, log: notice.log, message: notice.message, exitCode: notice.exitCode, status: notice.status,
       });
+      const hint = notice.status === 'done'
+        ? ''
+        : computerPolicy.visibleLine(computerDeploy.deployHint({ output: notice.output, stderr: notice.stderr, message: notice.message }));
       deployWindow.webContents.send('1904:deploy-run-result', {
         appId: notice.request.app.id,
         ok: notice.status === 'done',
         status: notice.status,
         exitCode: Number.isInteger(notice.exitCode) ? notice.exitCode : null,
         message: summary,
+        hint,
         output: computerPolicy.visibleText(combined.slice(-16000)),
       });
     }
@@ -1299,12 +1303,21 @@ function onComputerNotice(notice) {
       const combined = computerDeploy.formatDeployOutput({
         output: notice.output, stderr: notice.stderr, log: notice.log, message: notice.message, exitCode: notice.exitCode, status: notice.status,
       });
+      const hint = notice.status === 'done'
+        ? ''
+        : computerPolicy.visibleLine(computerDeploy.deployHint({ output: notice.output, stderr: notice.stderr, message: notice.message }));
+      const gitAuth = computerDeploy.parseDryRunGit(
+        notice.output,
+        checked?.folder || computerDeploy.leadingCdFolder(checked?.commands)?.folder || '',
+      );
       deployWindow.webContents.send('1904:deploy-dry-run-result', {
         appId: notice.request.app.id,
         ok: notice.status === 'done',
         status: notice.status,
         exitCode: Number.isInteger(notice.exitCode) ? notice.exitCode : null,
         message: computerPolicy.visibleLine(notice.message || ''),
+        hint,
+        gitAuth,
         output: computerPolicy.visibleText(combined.slice(-16000)),
         // Build commands that usually go with what the folder holds, for the person to read and save themselves.
         suggested: checked ? computerDeploy.suggestCommands(notice.output, checked.commands) : undefined,
@@ -1968,17 +1981,22 @@ function deployState() {
 // separate words and nothing of 1904 Desktop's environment but what a command gets.
 
 /** Runs one program to its end: `{ code, stdout, stderr }`, never throwing. Its own session, so ssh has no terminal to ask on. */
-function runSetup(file, args, { env, timeoutMs = deploySsh.SETUP_TIMEOUT_MS } = {}) {
+function runSetup(file, args, { env, stdin, timeoutMs = deploySsh.SETUP_TIMEOUT_MS } = {}) {
   return new Promise(resolve => {
     let child;
     const out = { stdout: '', stderr: '' };
+    const hasStdin = typeof stdin === 'string';
     try {
-      child = spawn(file, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
+      child = spawn(file, args, { env, stdio: [hasStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
     } catch (error) {
       resolve({ code: null, stdout: '', stderr: String(error?.message ?? error) });
       return;
     }
     const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, timeoutMs);
+    if (hasStdin && child.stdin) {
+      child.stdin.on('error', () => { /* ssh closed stdin early */ });
+      try { child.stdin.end(stdin, 'utf8'); } catch { /* already closed */ }
+    }
     for (const stream of ['stdout', 'stderr']) child[stream]?.on('data', chunk => { out[stream] = (out[stream] + chunk).slice(-16 * 1024); });
     child.on('error', error => { clearTimeout(timer); resolve({ code: null, ...out, stderr: out.stderr || String(error?.message ?? error) }); });
     child.on('close', code => { clearTimeout(timer); resolve({ code, ...out }); });
@@ -2067,6 +2085,104 @@ async function installDeployKey(appId, input, password) {
     if (ran.code === 0 && done.confirmed) return { ok: true };
     return { ok: false, error: ran.code === 0 ? 'The host did not confirm that the key was added.' : deploySsh.sshProblem(ran.stderr, { password: true }) };
   });
+}
+
+/** Runs a one-shot setup script on the saved recipe's host using its saved SSH connection. */
+async function runOnRecipeHost(recipe, appId, { word, stdin, timeoutMs = 60_000 }) {
+  const info = computerLink?.info();
+  if (!info || !recipe || !computerDeploy.isRemote(recipe)) return { ok: false, error: 'Save a remote host setup for this app first.' };
+  const platform = computerPlatform();
+  return withSetupFolder(async dir => {
+    const baseEnv = {
+      ...setupEnvironment(dir),
+      ...computerDeploy.deployEnvironment({ platform, env: process.env }),
+    };
+    if (recipe.host) {
+      const ssh = deploySsh.sshProgram('ssh', { platform, env: process.env, exists: existsSync });
+      if (!ssh) return NO_SSH;
+      const { host } = recipe;
+      const files = {};
+      const secretEnv = {};
+      if (host.auth !== 'ssh') {
+        files.knownHosts = path.join(dir, 'known_hosts');
+        await writeFile(files.knownHosts, host.keys.join('\n') + '\n', { mode: 0o600 });
+      }
+      if (host.auth === 'key') {
+        const key = await deploySecrets?.privateKey(appId, info.id);
+        if (!key) return { ok: false, error: 'This app’s deploy key is not on this computer anymore. Create and add it again.' };
+        files.key = path.join(dir, 'key');
+        await writeFile(files.key, key.endsWith('\n') ? key : key + '\n', { mode: 0o600 });
+      } else if (host.auth === 'password-saved' || host.auth === 'password-ask') {
+        const password = deploySsh.cleanPassword(host.auth === 'password-saved'
+          ? await deploySecrets?.password(appId, info.id)
+          : await askDeployPassword({ request: { app: { id: appId, name: recipe.appName } }, host }).catch(() => undefined));
+        if (!password) {
+          return { ok: false, error: host.auth === 'password-saved' ? 'The saved host password is not on this computer anymore.' : 'No host password was entered.' };
+        }
+        const helper = deploySsh.askpass({ platform });
+        const helperFile = path.join(dir, helper.name);
+        await writeFile(helperFile, helper.text, { mode: helper.mode ?? 0o600 });
+        Object.assign(secretEnv, deploySsh.passwordEnvironment({ helper: helperFile, password, env: process.env }));
+      }
+      const ran = await runSetup(ssh, deploySsh.sshArgs({ host, files, word }), { env: { ...baseEnv, ...secretEnv }, stdin, timeoutMs });
+      return { ok: true, ran, host };
+    }
+    // Custom connect command: quote the remote word for the local shell.
+    const ownShell = computerPolicy.computerShell({ platform, env: process.env, exists: existsSync });
+    const quoted = platform === 'windows' ? `'${word.replace(/'/g, "''")}'` : `'${word.replace(/'/g, "'\\''")}'`;
+    const plan = computerPolicy.commandPlan({ shell: ownShell, command: `${recipe.connect} ${quoted}` });
+    if (plan.error) return { ok: false, error: plan.error };
+    const ran = await runSetup(plan.file, plan.args, { env: baseEnv, stdin, timeoutMs });
+    return { ok: true, ran };
+  });
+}
+
+/** Saves HTTP(S) git credentials on the host (mode 600, repo-scoped) via SSH stdin and verifies with git fetch --dry-run. */
+async function setupDeployGitHttps(appId, input) {
+  const info = computerLink?.info();
+  const recipe = info ? deployRecipes?.get(appId, info.id) : undefined;
+  if (!recipe || !computerDeploy.isRemote(recipe)) return { ok: false, error: 'Save this app’s remote deploy setup first.' };
+  const nonce = randomBytes(8).toString('hex');
+  const built = computerDeploy.gitAuthHttpsPlan({
+    folder: input?.folder || recipe.folder || computerDeploy.leadingCdFolder(recipe.commands)?.folder || '',
+    origin: input?.origin,
+    username: input?.username,
+    token: input?.token,
+    nonce,
+  });
+  if (!built.ok) return built;
+  const exec = await runOnRecipeHost(recipe, appId, { word: built.word, stdin: built.stdin });
+  if (!exec.ok) return exec;
+  const done = computerDeploy.readDeployOutput(exec.ran.stdout, nonce);
+  if (exec.ran.code === 0 && done.confirmed && done.status === 0) return { ok: true };
+  if (!done.confirmed && exec.host) return { ok: false, error: deploySsh.sshProblem(exec.ran.stderr, { password: exec.host.auth === 'password-saved' || exec.host.auth === 'password-ask' }) };
+  const detail = computerPolicy.label(exec.ran.stderr.split(/\r?\n/).map(line => line.trim()).filter(Boolean).pop() || '', 260);
+  return { ok: false, error: detail || 'Git could not sign in with those credentials. Check the username and token/password.' };
+}
+
+/** Creates or reads a repo-scoped ed25519 deploy key on the host, sets local core.sshCommand, and checks git fetch --dry-run. */
+async function setupDeployGitSsh(appId, input) {
+  const info = computerLink?.info();
+  const recipe = info ? deployRecipes?.get(appId, info.id) : undefined;
+  if (!recipe || !computerDeploy.isRemote(recipe)) return { ok: false, error: 'Save this app’s remote deploy setup first.' };
+  const nonce = randomBytes(8).toString('hex');
+  const built = computerDeploy.gitAuthSshPlan({
+    folder: input?.folder || recipe.folder || computerDeploy.leadingCdFolder(recipe.commands)?.folder || '',
+    slug: recipe.repo || recipe.appName || appId,
+    remoteUrl: input?.remoteUrl || '',
+    nonce,
+  });
+  if (!built.ok) return built;
+  const exec = await runOnRecipeHost(recipe, appId, { word: built.word });
+  if (!exec.ok) return exec;
+  const done = computerDeploy.readDeployOutput(exec.ran.stdout, nonce);
+  const parsed = computerDeploy.readGitAuthSshOutput(exec.ran.stdout, nonce);
+  if (exec.ran.code === 0 && done.confirmed && done.status === 0 && parsed.publicKey) {
+    return { ok: true, publicKey: parsed.publicKey, fetchOk: parsed.fetchOk };
+  }
+  if (!done.confirmed && exec.host) return { ok: false, error: deploySsh.sshProblem(exec.ran.stderr, { password: exec.host.auth === 'password-saved' || exec.host.auth === 'password-ask' }) };
+  const detail = computerPolicy.label(exec.ran.stderr.split(/\r?\n/).map(line => line.trim()).filter(Boolean).pop() || '', 260);
+  return { ok: false, error: detail || 'Could not create the repository SSH deploy key on the host.' };
 }
 
 // ── A password typed for one deploy ────────────────────────────────────────
@@ -2249,6 +2365,20 @@ function installDeployHandlers() {
     if (!isDeploySender(event) || typeof appId !== 'string') return null;
     return deployArmed() ? installDeployKey(appId, input, password).catch(() => ({ ok: false, error: 'Could not add the key on the host.' })) : DEPLOY_NOT_ARMED;
   });
+  ipcMain.handle('1904:deploy-git-auth-https', (event, appId, input) => {
+    if (!isDeploySender(event) || typeof appId !== 'string') return null;
+    return deployArmed() ? setupDeployGitHttps(appId, input).catch(() => ({ ok: false, error: 'Could not save git credentials on the host.' })) : DEPLOY_NOT_ARMED;
+  });
+  ipcMain.handle('1904:deploy-git-auth-ssh', (event, appId, input) => {
+    if (!isDeploySender(event) || typeof appId !== 'string') return null;
+    return deployArmed() ? setupDeployGitSsh(appId, input).catch(() => ({ ok: false, error: 'Could not create a repo deploy key on the host.' })) : DEPLOY_NOT_ARMED;
+  });
+  // Copy a validated public deploy key to clipboard (public key only; never accepts arbitrary secret text).
+  ipcMain.on('1904:deploy-copy-pubkey', (event, key) => {
+    if (!isDeploySender(event)) return;
+    const valid = deploySsh.publicKey(key);
+    if (valid) clipboard.writeText(valid);
+  });
   // Copy the command that adds this app's public key on the host by hand. The key is public; nothing secret is copied.
   ipcMain.on('1904:deploy-copy-install', (event, appId) => {
     if (!isDeploySender(event) || typeof appId !== 'string') return;
@@ -2259,6 +2389,14 @@ function installDeployHandlers() {
     if (!isDeploySender(event) || typeof appId !== 'string') return;
     const url = deployApps.get(appId)?.cloneUrl;
     if (url) clipboard.writeText(url);
+  });
+  ipcMain.on('1904:deploy-open-activity', (event) => {
+    if (!isDeploySender(event)) return;
+    showActivity({ focus: true });
+  });
+  ipcMain.on('1904:deploy-copy-output', (event, text) => {
+    if (!isDeploySender(event) || typeof text !== 'string' || !text) return;
+    clipboard.writeText(text.slice(0, 64 * 1024));
   });
   ipcMain.on('1904:secret-answer', (event, nonce, value) => {
     if (!isSecretSender(event) || !secretPending || nonce !== secretPending.nonce) return;
