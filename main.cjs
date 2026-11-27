@@ -27,7 +27,7 @@ const { installScreenCapture } = require('./screen-capture.cjs');
 const { installSnippetCapture } = require('./snippet-capture.cjs');
 const computerPolicy = require('./computer-policy.cjs');
 const { connectPrompt, resumePrompt, createComputerLink, pairComputer } = require('./computer-link.cjs');
-const { createDesktopBrowserBridge } = require('./browser-bridge.cjs');
+const { createDesktopBrowserBridge, maskPairingCode } = require('./browser-bridge.cjs');
 const { createDeviceInfoReader } = require('./device-info.cjs');
 const readDeviceInfo = createDeviceInfoReader();
 const { createComputerBridge } = require('./computer-bridge.cjs');
@@ -52,6 +52,7 @@ const ACTIVITY_PAGE = path.join(__dirname, 'activity.html');
 const APPROVAL_PAGE = path.join(__dirname, 'approval.html');
 const DEPLOY_PAGE = path.join(__dirname, 'deploy.html');
 const SECRET_PAGE = path.join(__dirname, 'secret.html');
+const BROWSER_CONNECT_PAGE = path.join(__dirname, 'browser-connect.html');
 const TASK_NOTICE_PAGE = path.join(__dirname, 'task-notice.html');
 // The prompt takes no Run until it has been in front this long, and opens only after a pause in the
 // person's typing and clicking in the dashboard (or after the longest wait), so no key press or click
@@ -109,12 +110,16 @@ let updateReady = false;
 let computerLink;
 let computerBridge;
 let desktopBrowserBridge;
+let browserConnectWindow;
+let browserPairingCode;
+let browserExtensionFolder;
 let computerConnecting;
 let computerResuming;
 let computerQuitting = false;
 let computerMenuKey;
 let activityWindow;
 let deployWindow;
+let pendingDeployAppId;
 let deployRecipes;
 let deployApps = new Map();
 let deployMessage;
@@ -501,6 +506,10 @@ function syncTitleBar() {
   }
   if (deployWindow && !deployWindow.isDestroyed()) {
     deployWindow.webContents.send('1904:deploy-theme', theme);
+  }
+  if (browserConnectWindow && !browserConnectWindow.isDestroyed()) {
+    browserConnectWindow.setBackgroundColor(palette.color);
+    browserConnectWindow.webContents.send('1904:browser-connect-theme', theme);
   }
   if (approvalWindow && !approvalWindow.isDestroyed()) {
     approvalWindow.setBackgroundColor(palette.color);
@@ -904,35 +913,6 @@ function showReleaseNotes() {
   });
 }
 
-function computerMenu() {
-  if (!computerBridge) return [];
-  const info = computerLink.info();
-  // A Windows menu label treats & as a shortcut marker.
-  const menuText = text => process.platform === 'win32' ? String(text).replace(/&/g, '&&') : String(text);
-  const paused = computerLink.paused();
-  return [
-    { type: 'separator' },
-    info
-      ? { label: 'Use My Computer', submenu: [
-        { label: `Connected as ${menuText(info.name)}`, enabled: false },
-        ...(info.account ? [{ label: `1904 account: ${menuText(info.account)}`, enabled: false }] : []),
-        { type: 'separator' },
-        { label: paused ? 'Resume Use My Computer' : 'Pause Use My Computer', click: () => setComputerPaused(!paused) },
-        ...computerBridge.away().map(lease => ({
-          label: `End Away Mode for ${menuText(computerPolicy.label(lease.taskTitle, 40))}`, click: () => computerBridge.endAway(lease.id),
-        })),
-        ...computerBridge.taskAllowances().map(entry => ({
-          label: `Stop Allowing ${menuText(computerPolicy.label(entry.taskTitle, 40))}`, click: () => computerBridge.endTaskAllowance(entry.taskId),
-        })),
-        { type: 'separator' },
-        { label: 'Disconnect This Computer…', click: () => { void disconnectComputer(); } },
-      ] }
-      : { label: 'Use My Computer…', click: () => { void connectComputer(); } },
-    { label: 'Computer Activity', click: () => showActivity() },
-    { label: 'Deploy From This Computer…', click: () => showDeploys() },
-  ];
-}
-
 function menuEscape(text) {
   return process.platform === 'win32' ? String(text).replace(/&/g, '&&') : String(text);
 }
@@ -1126,10 +1106,8 @@ function installMenu() {
     { label: '1904', submenu: [
       { label: 'Open Agents', accelerator: 'CmdOrCtrl+Shift+A', click: () => { loginReturnTo = '/agents'; showDashboard(); loadPage(dashboardContents, AGENTS); } },
       { label: 'Open Copied 1904 Link', accelerator: 'CmdOrCtrl+Shift+O', click: () => { showDashboard(); openCopiedLink(); } },
-      ...(accountStore ? [{ label: 'Accounts', submenu: accountsMenuItems() }] : []),
       { label: 'Sign In with Browser…', click: beginBrowserSignIn },
       { label: 'Open in Browser', click: () => openBrowser(AGENTS) },
-      ...computerMenu(),
       ...(mac ? [] : [{ type: 'separator' }, { role: 'quit' }]),
     ] },
     { role: 'editMenu' },
@@ -1297,16 +1275,43 @@ function onComputerNotice(notice) {
     computerNotice(`Deploying ${name}`, 'Running the deploy commands you saved on this computer, without asking. Open Computer Activity to watch or stop it.');
   } else if (notice.kind === 'deploy-finished') {
     const name = computerPolicy.shortLine(notice.request.app.name, 60);
+    const summary = computerPolicy.visibleLine(notice.message || '');
     if (notice.status === 'done') computerNotice(`Deployed ${name}`, 'The deploy commands finished.');
-    else computerNotice(`${name} did not deploy`, Number.isInteger(notice.exitCode) ? `The commands ended with exit code ${notice.exitCode}. Open Computer Activity for the output.` : 'Open Computer Activity for what happened.');
-    sendDeployState();
-  } else if (notice.kind === 'dry-run-finished') {
-    // Shown in the deploy window, where the person is: what the host said, and whether anything would stop a deploy.
+    else computerNotice(`${name} did not deploy`, summary || (Number.isInteger(notice.exitCode) ? `The commands ended with exit code ${notice.exitCode}. Open Computer Activity for the output.` : 'Open Computer Activity for what happened.'));
     if (deployWindow && !deployWindow.isDestroyed()) {
-      deployWindow.webContents.send('1904:deploy-dry-run-result', {
-        appId: notice.request.app.id, ok: notice.status === 'done', output: computerPolicy.visibleText(String(notice.output ?? '').slice(-8000)),
+      const combined = computerDeploy.formatDeployOutput({
+        output: notice.output, stderr: notice.stderr, log: notice.log, message: notice.message, exitCode: notice.exitCode, status: notice.status,
+      });
+      deployWindow.webContents.send('1904:deploy-run-result', {
+        appId: notice.request.app.id,
+        ok: notice.status === 'done',
+        status: notice.status,
+        exitCode: Number.isInteger(notice.exitCode) ? notice.exitCode : null,
+        message: summary,
+        output: computerPolicy.visibleText(combined.slice(-16000)),
       });
     }
+    sendDeployState();
+  } else if (notice.kind === 'dry-run-finished') {
+    // Shown in the deploy window, where the person is: what the host said (stdout + stderr), and whether anything would stop a deploy.
+    if (deployWindow && !deployWindow.isDestroyed()) {
+      const checked = deployRecipes?.all().find(recipe => recipe.appId === notice.request.app.id);
+      const combined = computerDeploy.formatDeployOutput({
+        output: notice.output, stderr: notice.stderr, log: notice.log, message: notice.message, exitCode: notice.exitCode, status: notice.status,
+      });
+      deployWindow.webContents.send('1904:deploy-dry-run-result', {
+        appId: notice.request.app.id,
+        ok: notice.status === 'done',
+        status: notice.status,
+        exitCode: Number.isInteger(notice.exitCode) ? notice.exitCode : null,
+        message: computerPolicy.visibleLine(notice.message || ''),
+        output: computerPolicy.visibleText(combined.slice(-16000)),
+        // Build commands that usually go with what the folder holds, for the person to read and save themselves.
+        suggested: checked ? computerDeploy.suggestCommands(notice.output, checked.commands) : undefined,
+      });
+    }
+    // The checklist in the window shows what this dry run found.
+    sendDeployState();
   }
   computerChanged();
 }
@@ -1708,25 +1713,89 @@ function startComputer() {
   computerBridge.start();
 }
 
+const BROWSER_EXTENSION_FILES = ['manifest.json', 'popup.html', 'popup.js', 'worker.js', 'README.txt'];
+const BROWSER_EXTENSIONS_URLS = new Set(['chrome://extensions', 'edge://extensions']);
+
+function isBrowserConnectPage(url) {
+  try {
+    const file = fileURLToPath(url);
+    return process.platform === 'win32' ? file.toLowerCase() === BROWSER_CONNECT_PAGE.toLowerCase() : file === BROWSER_CONNECT_PAGE;
+  } catch {
+    return false;
+  }
+}
+
+function isBrowserConnectSender(event) {
+  return Boolean(browserConnectWindow) && !browserConnectWindow.isDestroyed() && event.sender === browserConnectWindow.webContents &&
+    event.senderFrame === event.sender.mainFrame && isBrowserConnectPage(event.senderFrame?.url);
+}
+
+function browserConnectView() {
+  return {
+    theme: activeTheme(),
+    ...(desktopBrowserBridge ? desktopBrowserBridge.state() : { preference: 'auto', available: false, browser: 'Chrome / Edge' }),
+    codePreview: maskPairingCode(browserPairingCode),
+    folder: browserExtensionFolder || '',
+  };
+}
+
+function sendBrowserConnectState() {
+  if (browserConnectWindow && !browserConnectWindow.isDestroyed()) {
+    browserConnectWindow.webContents.send('1904:browser-connect-state', browserConnectView());
+  }
+}
+
+async function stageBrowserExtensionFolder() {
+  const folder = path.join(app.getPath('userData'), 'extensions', '1904-browser-extension');
+  await mkdir(folder, { recursive: true });
+  const bundled = await Promise.all(
+    BROWSER_EXTENSION_FILES.map(async name => [name, await readFile(path.join(app.getAppPath(), 'browser-extension', name))]),
+  );
+  for (const [name, content] of bundled) await writeFile(path.join(folder, name), content);
+  // Keep a previously loaded legacy folder up to date so Reload picks up the updated extension.
+  const legacy = path.join(app.getPath('userData'), 'browser-extension');
+  if (existsSync(legacy)) {
+    for (const [name, content] of bundled) await writeFile(path.join(legacy, name), content);
+  }
+  browserExtensionFolder = folder;
+  return folder;
+}
+
+function showBrowserConnect() {
+  if (browserConnectWindow && !browserConnectWindow.isDestroyed()) {
+    if (browserConnectWindow.isMinimized()) browserConnectWindow.restore();
+    browserConnectWindow.show();
+    browserConnectWindow.focus();
+    sendBrowserConnectState();
+    return browserConnectWindow;
+  }
+  const win = new BrowserWindow({
+    title: 'Connect your browser', icon: ICON, width: 580, height: 760, minWidth: 460, minHeight: 520,
+    backgroundColor: PALETTE[activeTheme()].color, autoHideMenuBar: true, show: false,
+    webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'browser-connect-preload.cjs') },
+  });
+  browserConnectWindow = win;
+  win.on('closed', () => { if (browserConnectWindow === win) browserConnectWindow = undefined; });
+  win.webContents.on('dom-ready', () => sendBrowserConnectState());
+  void win.loadFile(BROWSER_CONNECT_PAGE);
+  win.show();
+  return win;
+}
+
 function startDesktopBrowser() {
   desktopBrowserBridge = createDesktopBrowserBridge({
     file: path.join(app.getPath('userData'), 'browser-settings.json'), fetch: sessionFetch, origin: ORIGIN,
     confirm: async ({site}) => (await messageBox({type:'question',title:'Use your browser',message:'Share this browser tab with the task?',detail:`Website: ${site}\nOnly this selected tab is shared. Its page and screenshots go to the task; cookies stay on this computer. Browser actions still use the task’s approval controls.`,buttons:['Cancel','Share tab'],defaultId:0,cancelId:0,noLink:true},computerParent())).response === 1,
+    onChange: () => sendBrowserConnectState(),
   });
   powerMonitor.on('suspend', () => desktopBrowserBridge.pause());
   powerMonitor.on('resume', () => desktopBrowserBridge.resume());
   app.on('will-quit', () => desktopBrowserBridge.close());
 }
 async function setupDesktopBrowser() {
-  const code = await desktopBrowserBridge.setup();
-  const {response} = await messageBox({type:'info',title:'Connect your browser',message:'Connect Chrome or Edge',detail:'Load the 1904 browser extension, then open it on the tab you want to share. Paste a connection code from here and select Share this tab. You approve each task separately. Safari and Firefox are not supported yet.',buttons:['Cancel','Copy connection code','Open extension folder'],defaultId:0,cancelId:0,noLink:true},computerParent());
-  if(response===1)clipboard.writeText(code);
-  if(response===2){
-    const folder=path.join(app.getPath('userData'),'browser-extension');
-    await mkdir(folder,{recursive:true});
-    for(const name of ['manifest.json','popup.html','popup.js','worker.js'])await writeFile(path.join(folder,name),await require('node:fs/promises').readFile(path.join(app.getAppPath(),'browser-extension',name)));
-    await shell.openPath(folder);
-  }
+  browserPairingCode = await desktopBrowserBridge.setup();
+  await stageBrowserExtensionFolder();
+  showBrowserConnect();
   return desktopBrowserBridge.state();
 }
 function installDesktopBrowserHandlers() {
@@ -1749,6 +1818,32 @@ function installDesktopBrowserHandlers() {
   });
   ipcMain.handle('1904:browser-release', (event,input) => {
     if(isComputerDashboardSender(event))desktopBrowserBridge.release(input||{});
+  });
+  ipcMain.handle('1904:browser-connect-state', event => isBrowserConnectSender(event) ? browserConnectView() : null);
+  ipcMain.handle('1904:browser-connect-copy-code', async event => {
+    if (!isBrowserConnectSender(event)) return false;
+    browserPairingCode = await desktopBrowserBridge.setup();
+    clipboard.writeText(browserPairingCode);
+    sendBrowserConnectState();
+    return true;
+  });
+  ipcMain.handle('1904:browser-connect-open-folder', async event => {
+    if (!isBrowserConnectSender(event)) return false;
+    const folder = await stageBrowserExtensionFolder();
+    shell.showItemInFolder(folder);
+    sendBrowserConnectState();
+    return true;
+  });
+  ipcMain.handle('1904:browser-connect-copy-folder', async event => {
+    if (!isBrowserConnectSender(event)) return false;
+    const folder = browserExtensionFolder || await stageBrowserExtensionFolder();
+    clipboard.writeText(folder);
+    return true;
+  });
+  ipcMain.handle('1904:browser-connect-copy-url', (event, value) => {
+    if (!isBrowserConnectSender(event) || !BROWSER_EXTENSIONS_URLS.has(value)) return false;
+    clipboard.writeText(value);
+    return true;
   });
 }
 
@@ -1779,18 +1874,32 @@ function deployArmed() {
 }
 const DEPLOY_NOT_ARMED = { ok: false, error: 'Try that again: the window had only just come to the front.' };
 
-function showDeploys() {
+function cleanDeployAppId(appId) {
+  return typeof appId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(appId) ? appId : undefined;
+}
+
+function showDeploys(appId) {
+  const targetAppId = cleanDeployAppId(appId);
+  if (targetAppId) pendingDeployAppId = targetAppId;
   if (deployWindow && !deployWindow.isDestroyed()) {
     if (deployWindow.isMinimized()) deployWindow.restore();
     deployWindow.show();
     deployWindow.focus();
+    if (targetAppId) deployWindow.webContents.send('1904:deploy-select', targetAppId);
     return deployWindow;
   }
   const win = new BrowserWindow({
-    title: 'Deploy From This Computer', icon: ICON, width: 720, height: 780, minWidth: 460, minHeight: 420,
+    title: 'Deploy From This Computer', icon: ICON, width: 1140, height: 840, minWidth: 680, minHeight: 480,
     backgroundColor: PALETTE[activeTheme()].color, autoHideMenuBar: true, show: false,
     webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'deploy-preload.cjs') },
   });
+  try {
+    const area = screen.getDisplayMatching(mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : win.getBounds()).workArea;
+    if (area.width < 1188 || area.height < 888) {
+      win.setSize(Math.min(1140, Math.max(680, area.width - 48)), Math.min(840, Math.max(480, area.height - 48)));
+      win.center();
+    }
+  } catch { /* default size applies */ }
   deployWindow = win;
   win.on('closed', () => { if (deployWindow === win) deployWindow = undefined; });
   win.on('focus', () => { deployFocusedAt = Date.now(); });
@@ -1801,6 +1910,33 @@ function showDeploys() {
   return win;
 }
 
+/** Non-secret summary of apps configured to deploy from this computer, for Settings → 1904 Desktop. */
+function deploySummaries() {
+  const pairedId = computerLink?.info()?.id;
+  return (deployRecipes?.all() ?? [])
+    .sort((a, b) => a.position - b.position || a.appName.localeCompare(b.appName))
+    .map(recipe => {
+      const view = computerDeploy.recipeView(recipe, pairedId);
+      return {
+        appId: view.appId,
+        appName: view.appName,
+        repo: view.repo,
+        auto: view.auto,
+        noApproval: view.noApproval,
+        position: view.position,
+        stale: view.stale,
+        ...(view.lastRun ? {
+          lastRun: {
+            at: view.lastRun.at,
+            status: view.lastRun.status,
+            exitCode: view.lastRun.exitCode,
+            ...(view.lastRun.message ? { message: view.lastRun.message } : {}),
+          },
+        } : {}),
+      };
+    });
+}
+
 /** What the window shows, from what this computer has saved and the app list 1904 last answered. */
 function deployState() {
   const info = computerLink?.info();
@@ -1808,13 +1944,20 @@ function deployState() {
   return {
     platform: computerPlatform(),
     connection: { connected: Boolean(info), text: info ? `Connected to 1904 as ${info.name}.${connection.paused ? ' Use My Computer is paused, so nothing from 1904 runs until you resume it.' : ''}` : connection.text },
-    apps: [...deployApps.values()].map(appRef => ({ id: appRef.id, name: computerPolicy.visibleLine(appRef.name), ...(appRef.cloneUrl ? { cloneUrl: appRef.cloneUrl } : {}) })),
+    // The repository's name goes along so the window can say which checkout the app folder should be. Only a plain name is shown.
+    apps: [...deployApps.values()].map(appRef => ({
+      id: appRef.id,
+      name: computerPolicy.visibleLine(appRef.name),
+      repo: /^[A-Za-z0-9._-]{1,100}$/.test(appRef.repo ?? '') ? appRef.repo : '',
+      ...(appRef.cloneUrl ? { cloneUrl: appRef.cloneUrl } : {}),
+    })),
     recipes: (deployRecipes?.all() ?? []).map(recipe => computerDeploy.recipeView(recipe, info?.id)),
     // Whether a password or a deploy key is kept for each app, and the key's public half. Never a secret.
     kept: Object.fromEntries([...new Set([...deployApps.keys(), ...(deployRecipes?.all() ?? []).map(recipe => recipe.appId)])].map(appId => {
       const summary = deploySecrets?.summary(appId, info?.id) ?? { password: false };
       return [appId, { password: summary.password, publicKey: summary.publicKey ?? '', installCommand: deploySsh.installKeyCommand(summary.publicKey) }];
     })),
+    ...(pendingDeployAppId ? { selectedAppId: pendingDeployAppId } : {}),
     ...(deployMessage ? { message: deployMessage } : {}),
   };
 }
@@ -2012,7 +2155,7 @@ async function syncDeploys() {
 
 async function saveDeployRecipe(appId, input) {
   const info = computerLink?.info();
-  if (!computerBridge || !deployRecipes || !info) return { ok: false, error: 'Connect this computer first: choose Use My Computer… in the 1904 menu.' };
+  if (!computerBridge || !deployRecipes || !info) return { ok: false, error: 'Connect this computer first in Settings → Computers.' };
   const appRef = deployApps.get(appId) ?? deployRecipes.all().find(recipe => recipe.appId === appId && recipe.computerId === info.id);
   if (!appRef) return { ok: false, error: 'Choose one of your apps.' };
   const checked = computerDeploy.cleanRecipe(input);
@@ -2070,7 +2213,9 @@ function installDeployHandlers() {
   ipcMain.handle('1904:deploy-state', async (event) => {
     if (!isDeploySender(event)) return null;
     await syncDeploys().catch(() => false);
-    return deployState();
+    const snapshot = deployState();
+    pendingDeployAppId = undefined;
+    return snapshot;
   });
   ipcMain.handle('1904:deploy-save', (event, appId, input) => {
     if (!isDeploySender(event) || typeof appId !== 'string') return null;
@@ -2119,14 +2264,15 @@ function installDeployHandlers() {
     if (!isSecretSender(event) || !secretPending || nonce !== secretPending.nonce) return;
     settleSecret(deploySsh.cleanPassword(value));
   });
-  // The dashboard can open the window, nothing more, and only right after the person typed or clicked in the dashboard
-  // with it in front: a page cannot raise this window at a moment of its own choosing.
-  ipcMain.on('1904:computer-deploys', (event) => {
+  // The dashboard can open the window (optionally selecting one app to edit) and read non-secret recipe summaries,
+  // nothing more, and only right after the person typed or clicked in the dashboard with it in front.
+  ipcMain.on('1904:computer-deploys', (event, appId) => {
     if (!dashboardContents || event.sender !== dashboardContents || event.senderFrame !== event.sender.mainFrame) return;
     if (webUrl(event.senderFrame?.url)?.origin !== ORIGIN) return;
     if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) return;
-    showDeploys();
+    showDeploys(appId);
   });
+  ipcMain.handle('1904:computer-deploy-recipes', event => isComputerDashboardSender(event) ? deploySummaries() : null);
 }
 
 function installComputerHandlers() {
@@ -2138,6 +2284,12 @@ function installComputerHandlers() {
     if (!isComputerDashboardSender(event)) return null;
     if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) return computerState();
     return connectComputer();
+  });
+  ipcMain.handle('1904:computer-disconnect', async event => {
+    if (!isComputerDashboardSender(event)) return null;
+    if (!computerInput.decide({ focused: Boolean(mainWindow?.isFocused()) && Boolean(dashboardContents?.isFocused()) }).stamp) return computerState();
+    await disconnectComputer();
+    return computerState();
   });
   ipcMain.handle('1904:computer-away', (event, input) => isComputerDashboardSender(event) ? startAwayFromDashboard(input) : null);
   // Pause from Settings → 1904 Desktop. Pausing only takes access away, so the page may do it at once. Turning

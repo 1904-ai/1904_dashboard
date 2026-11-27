@@ -116,7 +116,27 @@ test('Settings reads the version and starts the Help menu’s update check, only
 
 test('the page gets these calls and nothing that runs, approves or reads a command', () => {
   assert.match(preload, /setPaused: paused => typeof paused === 'boolean' \? ipcRenderer\.invoke\('1904:computer-pause', paused\) : Promise\.resolve\(null\)/);
+  assert.match(preload, /disconnect: \(\) => ipcRenderer\.invoke\('1904:computer-disconnect'\)/);
+  assert.match(preload, /deploys: appId => ipcRenderer\.send\('1904:computer-deploys', typeof appId === 'string' \? appId : undefined\)/);
+  assert.match(preload, /deployRecipes: \(\) => ipcRenderer\.invoke\('1904:computer-deploy-recipes'\)/);
   assert.match(preload, /app: \{\s+info: \(\) => ipcRenderer\.invoke\('1904:app-info'\),\s+checkForUpdates: \(\) => ipcRenderer\.send\('1904:app-check-updates'\),\s+\}/);
   assert.match(resumePrompt('').message, /on this computer\?$/);
   assert.match(resumePrompt('Studio Mac').detail, /still asks you here first/);
+});
+
+test('the 1904 app menu no longer duplicates Accounts, Use My Computer, Computer Activity, or Deploy From This Computer', () => {
+  const menuStart = main.indexOf('function installMenu()');
+  const menuEnd = main.indexOf('// ── Use My Computer', menuStart);
+  const menuBlock = main.slice(menuStart, menuEnd);
+  assert.doesNotMatch(menuBlock, /label:\s*'Accounts'/);
+  assert.doesNotMatch(menuBlock, /computerMenu\(/);
+  assert.doesNotMatch(menuBlock, /Use My Computer/);
+  assert.doesNotMatch(menuBlock, /Computer Activity/);
+  assert.doesNotMatch(menuBlock, /Deploy From This Computer/);
+  assert.match(main, /ipcMain\.handle\('1904:computer-disconnect'/);
+  assert.match(main, /ipcMain\.handle\('1904:computer-deploy-recipes', event => isComputerDashboardSender\(event\) \? deploySummaries\(\) : null\)/);
+  const summaryStart = main.indexOf('function deploySummaries()');
+  const summaryEnd = main.indexOf('function deployState()', summaryStart);
+  const summaryBlock = main.slice(summaryStart, summaryEnd);
+  assert.doesNotMatch(summaryBlock, /\bcommands\b|\bconnect\b|\bhost\b|\bfolder\b/, 'deploySummaries never leaks commands, host, or paths to the dashboard');
 });

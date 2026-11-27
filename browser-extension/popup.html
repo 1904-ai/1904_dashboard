@@ -1,1 +1,42 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>1904 browser</title><style>:root{color-scheme:dark;--bg:#1b1e21;--fg:#f4f5f6;--muted:#c1c8cf;--line:#363c42;--primary:#a9c7e8}*{box-sizing:border-box}body{width:340px;margin:0;padding:20px;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui}h1{font-size:18px;margin:0 0 12px}p{color:var(--muted)}label,input,button{display:block;width:100%}input,button{font:inherit;min-height:44px;border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:8px;background:var(--bg);color:var(--fg)}button{cursor:pointer}button[type=submit]{background:var(--primary);color:#0e1b2a}input:focus-visible,button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}</style></head><body><h1>Share this tab with 1904</h1><p>Use your current sign-in. Only this tab is shared, after you approve the task in Desktop.</p><form id="connect"><label for="code">Connection code from Desktop Settings</label><input id="code" type="password" autocomplete="off" required><button type="submit">Share this tab</button></form><button id="stop" type="button">Stop sharing</button><p id="status" role="status">Your cookies stay in this browser.</p><script src="popup.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>1904 Desktop Browser</title>
+  <style>
+    :root { color-scheme: dark; --bg: #16191d; --panel: #1e2228; --fg: #f4f5f6; --muted: #b6bec7; --line: #343b43; --primary: #e2e7ec; --on-primary: #121416; --ok: #5cc489; --bad: #f08c87; --focus: #7ab7ff; }
+    * { box-sizing: border-box; }
+    body { width: 350px; margin: 0; padding: 18px; background: var(--bg); color: var(--fg); font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    h1 { font-size: 16px; margin: 0 0 6px; font-weight: 650; }
+    p { margin: 0 0 12px; color: var(--muted); }
+    .banner { margin: 0 0 12px; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--ok); background: var(--panel); color: var(--fg); font-size: 12.5px; }
+    .banner[hidden] { display: none; }
+    label { display: block; font-weight: 600; margin-bottom: 5px; }
+    input, button { display: block; width: 100%; font: inherit; min-height: 40px; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; background: var(--panel); color: var(--fg); }
+    input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+    .hint { margin: 5px 0 10px; font-size: 12px; color: var(--muted); }
+    button { margin-top: 8px; cursor: pointer; font-weight: 600; }
+    button[type=submit] { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+    button:hover { opacity: .92; }
+    input:focus-visible, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    #status { margin: 12px 0 0; font-size: 12.5px; }
+    #status[data-kind="ok"] { color: var(--ok); }
+    #status[data-kind="error"] { color: var(--bad); }
+  </style>
+</head>
+<body>
+  <h1>Share this tab with 1904</h1>
+  <p>Use your current sign-in. Only this tab is shared, after you approve the task in 1904 Desktop.</p>
+  <div id="connected" class="banner" hidden></div>
+  <form id="connect">
+    <label for="code">Pairing code from 1904 Desktop</label>
+    <input id="code" type="password" autocomplete="off" placeholder="1904-…" required>
+    <p class="hint">Copy this code from Connect your browser in 1904 Desktop.</p>
+    <button type="submit">Share this tab</button>
+  </form>
+  <button id="stop" type="button">Stop sharing</button>
+  <p id="status" role="status">Your cookies stay in this browser.</p>
+  <script src="popup.js"></script>
+</body>
+</html>

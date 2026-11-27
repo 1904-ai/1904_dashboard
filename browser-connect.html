@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+  <title>Connect your browser</title>
+  <style>
+    :root { color-scheme: dark; --canvas: #121416; --panel: #181b1e; --text: #e2e7ec; --muted: #9aa5b0; --line: #ffffff18;
+      --hover: #ffffff14; --edge: #ffffff38; --code: #0b0d0f; --ok: #5cc489; --ok-bg: #5cc4891a; --primary: #e2e7ec; --on-primary: #121416; --focus: #7ab7ff; }
+    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --panel: #ffffff; --text: #20262d; --muted: #59636e; --line: #00000016;
+      --hover: #0000000c; --edge: #00000030; --code: #eef1f4; --ok: #1f7a46; --ok-bg: #1f7a4614; --primary: #20262d; --on-primary: #ffffff; --focus: #0b62d6; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; display: flex; flex-direction: column; background: var(--canvas); color: var(--text); font: 400 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    [hidden] { display: none !important; }
+    header { flex: none; padding: 14px 20px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
+    .head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--edge); font-size: 11.5px; font-weight: 600; color: var(--muted); }
+    .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .pill[data-connected="true"] { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
+    .subtitle { margin: 4px 0 0; color: var(--muted); }
+    main { flex: 1 1 auto; overflow: auto; padding: 14px 20px 20px; display: grid; gap: 12px; align-content: start; }
+    .connected-banner { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--ok); background: var(--ok-bg); }
+    .connected-banner strong { display: block; color: var(--ok); font-size: 13px; }
+    .connected-banner p { margin: 2px 0 0; color: var(--text); font-size: 12.5px; }
+    .step { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px 14px; }
+    .step-head { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+    .num { flex: none; width: 22px; height: 22px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; border: 1px solid var(--edge); color: var(--text); }
+    .step-title { margin: 0; font-size: 13.5px; font-weight: 650; }
+    .tag { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 550; }
+    .desc { margin: 0 0 8px; color: var(--muted); font-size: 12.5px; }
+    ol.substeps { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+    ol.substeps li { padding-left: 2px; }
+    .inline-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .code-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--code); }
+    .code-value { flex: 1 1 180px; min-width: 0; font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); overflow-wrap: anywhere; }
+    .path-box { margin-top: 8px; padding: 7px 10px; border-radius: 7px; background: var(--code); border: 1px solid var(--line); font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); overflow-wrap: anywhere; }
+    .feedback { margin: 6px 0 0; font-size: 12px; color: var(--ok); }
+    .feedback:empty { display: none; }
+    .note { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+    code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 1px 4px; border-radius: 4px; background: var(--code); }
+    footer { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--canvas); }
+    .foot-note { margin: 0; font-size: 12px; color: var(--muted); }
+    button { font: 600 12.5px system-ui, -apple-system, "Segoe UI", sans-serif; color: inherit; background: transparent; border: 1px solid var(--edge); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--hover); }
+    button.primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+    button.primary:hover:not(:disabled) { background: var(--primary); opacity: .88; }
+    button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    button:disabled { opacity: .45; cursor: default; }
+    @media (forced-colors: active) { .step, .code-row, .path-box, .connected-banner, button { border: 1px solid CanvasText; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="head-row">
+      <h1>Connect your browser</h1>
+      <span id="status-pill" class="pill" data-connected="false" role="status">Not connected</span>
+    </div>
+    <p class="subtitle">Share one signed-in Chrome or Edge tab with a 1904 task. Keep this window open while you follow the steps.</p>
+  </header>
+  <main>
+    <div id="connected-banner" class="connected-banner" hidden>
+      <strong id="connected-heading">Connected</strong>
+      <p id="connected-detail"></p>
+    </div>
+
+    <section class="step" aria-labelledby="step1-title">
+      <div class="step-head">
+        <span class="num" aria-hidden="true">1</span>
+        <h2 id="step1-title" class="step-title">Install the 1904 extension in Chrome or Edge</h2>
+        <span class="tag">One-time setup</span>
+      </div>
+      <p class="desc">Until the extension is on the browser store, Chrome and Edge load it from a folder on your computer.</p>
+      <ol class="substeps">
+        <li>Open your browser’s extensions page by pasting <code>chrome://extensions</code> (or <code>edge://extensions</code>) into the address bar.
+          <div class="inline-actions">
+            <button type="button" id="copy-chrome-url">Copy chrome://extensions</button>
+            <button type="button" id="copy-edge-url">Copy edge://extensions</button>
+          </div>
+          <p id="url-feedback" class="feedback" role="status" aria-live="polite"></p>
+        </li>
+        <li>Turn on <strong>Developer mode</strong> (top-right toggle).</li>
+        <li>Click <strong>Load unpacked</strong>, then select the <strong>1904-browser-extension</strong> folder itself (you do not need to open the files inside it).
+          <div class="inline-actions">
+            <button type="button" id="open-folder">Open extension folder</button>
+            <button type="button" id="copy-folder">Copy folder path</button>
+          </div>
+          <div id="folder-path" class="path-box" aria-label="Extension folder path"></div>
+          <p id="folder-feedback" class="feedback" role="status" aria-live="polite"></p>
+        </li>
+      </ol>
+      <p class="note">Already installed? Skip to step 2. After updating 1904 Desktop, click <strong>Reload</strong> on the extension card.</p>
+    </section>
+
+    <section class="step" aria-labelledby="step2-title">
+      <div class="step-head">
+        <span class="num" aria-hidden="true">2</span>
+        <h2 id="step2-title" class="step-title">Copy your pairing code</h2>
+      </div>
+      <p class="desc">Paste this code into the <strong>1904 Desktop Browser</strong> extension popup — not your browser’s address bar. It is a temporary code for this session, not a web link.</p>
+      <div class="code-row">
+        <span id="code-preview" class="code-value" aria-label="Pairing code preview">1904-…</span>
+        <button type="button" class="primary" id="copy-code">Copy pairing code</button>
+      </div>
+      <p id="code-feedback" class="feedback" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="step" aria-labelledby="step3-title">
+      <div class="step-head">
+        <span class="num" aria-hidden="true">3</span>
+        <h2 id="step3-title" class="step-title">Share a signed-in tab</h2>
+      </div>
+      <ol class="substeps">
+        <li>Switch to the Chrome or Edge tab you want 1904 to use (a public website).</li>
+        <li>Click the <strong>Extensions</strong> puzzle icon in your browser toolbar and open <strong>1904 Desktop Browser</strong>.</li>
+        <li>Paste the pairing code and click <strong>Share this tab</strong>.</li>
+        <li>This window updates automatically once connected. 1904 Desktop still asks before each task uses the tab.</li>
+      </ol>
+    </section>
+  </main>
+  <footer>
+    <p class="foot-note">Cookies stay in your browser. Safari and Firefox are not supported yet.</p>
+    <button type="button" id="close">Close</button>
+  </footer>
+</body>
+</html>
