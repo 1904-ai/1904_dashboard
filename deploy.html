@@ -76,6 +76,15 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     pre { margin: 8px 0 0; padding: 9px 11px; border-radius: 6px; background: var(--code); border: 1px solid var(--line);
       font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; }
+    .steps { list-style: none; margin: 12px 0 0; padding: 4px 12px; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .steps li { display: grid; grid-template-columns: 18px 1fr; gap: 0 8px; align-items: baseline; padding: 6px 0; }
+    .steps li + li { border-top: 1px solid var(--line); }
+    .steps .mark { font-weight: 700; text-align: center; color: var(--muted); }
+    .steps li[data-state="ok"] .mark { color: var(--run); }
+    .steps li[data-state="problem"] .mark { color: var(--bad); }
+    .steps .step-name { font-weight: 600; }
+    .steps .step-text { grid-column: 2; color: var(--muted); font-size: 12px; }
+    #suggest-use { margin-top: 8px; }
     button.link { border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; color: var(--text); font: inherit; background: transparent; min-width: 0; }
     button.link[data-copied="true"] { color: var(--run); text-decoration: none; font-weight: 600; }
     .order { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; flex-wrap: wrap; }
@@ -119,6 +128,7 @@
           <select id="app"></select>
         </label>
         <p class="hint" id="apps-empty" hidden>No apps to show yet. Apps you can work on in 1904 appear here.</p>
+        <ol class="steps" id="steps" aria-label="Setup for this app"></ol>
         <fieldset>
           <legend>Where the commands run</legend>
           <label class="choice"><input type="radio" name="where" value="host" checked><span>On a host, over SSH</span></label>
@@ -221,11 +231,17 @@
           </label>
           <p class="hint">A command that reaches the host and runs what is given to it, such as ssh with a host from your SSH settings. It must work without typing anything.</p>
         </div>
+        <div id="folder-fields">
+          <label class="field"><span>App folder on the host</span>
+            <input type="text" id="folder" spellcheck="false" autocapitalize="off" placeholder="/srv/my-app">
+          </label>
+          <p class="hint" id="folder-hint"></p>
+        </div>
         <label class="field"><span>Commands</span>
-          <textarea id="commands" spellcheck="false" autocapitalize="off" placeholder="cd /srv/my-app&#10;git pull --ff-only&#10;npm ci&#10;npm run build"></textarea>
+          <textarea id="commands" spellcheck="false" autocapitalize="off" placeholder="git pull --ff-only&#10;npm ci&#10;npm run build&#10;sudo systemctl restart my-app"></textarea>
         </label>
-        <p class="hint">One per line, run in order. The deploy stops at the first command that fails. DEPLOY_SHA and DEPLOY_BRANCH hold the merged commit and its branch.
-          Dry run checks them on the host without running any.</p>
+        <p class="hint">One per line, run in order, starting in the app folder. The deploy stops at the first command that fails. DEPLOY_SHA and DEPLOY_BRANCH hold the merged commit and its branch.
+          Dry run checks the folder, git and these commands on the host without running any, and suggests build commands from what it finds there.</p>
         <p class="hint" id="local-note" hidden>On this computer, PowerShell runs these. In PowerShell 7.4 or later a program that fails stops the deploy;
           in Windows PowerShell 5 only a failed cmdlet does, so end with your own check there.</p>
         <fieldset>
@@ -262,6 +278,12 @@
       </div>
       <p id="status" role="status" aria-live="polite"></p>
       <pre id="dry-output" hidden tabindex="0" aria-label="What the dry run found"></pre>
+      <div class="box" id="suggest-box" hidden>
+        <span class="box-title">Suggested commands</span>
+        <p class="hint" id="suggest-text"></p>
+        <pre id="suggest-lines"></pre>
+        <button type="button" id="suggest-use">Add to the commands</button>
+      </div>
     </form>
     <section aria-labelledby="saved-title">
       <h2 id="saved-title">Apps that deploy from this computer</h2>

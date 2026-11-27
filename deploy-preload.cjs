@@ -15,6 +15,10 @@ let activeAction = '';
 /** The host identity the person trusted for the host in the form, and what the last check showed. */
 let trusted = [];
 let seen = [];
+/** Build commands the last dry run suggested for the selected app, until they are added or the app changes. */
+let suggested;
+/** A new setup starts with the one command every one of them needs. */
+const FIRST_COMMAND = 'git pull --ff-only';
 /** The last deploy key added on a host in this window session: `{ appId, publicKey, target }`. */
 let installedKey;
 let copyTimer;
@@ -98,7 +102,7 @@ function formInput() {
   const place = where();
   return {
     ...(place === 'host' ? { host: { ...typedHost(), keys: trusted.map(key => key.line) }, password: $('host-password').value } : {}),
-    connect: place === 'custom' ? $('connect').value : '', commands: $('commands').value,
+    connect: place === 'custom' ? $('connect').value : '', folder: place === 'local' ? '' : $('folder').value, commands: $('commands').value,
     log: { mode: logMode(), path: $('log-path').value },
     auto: $('auto').checked, noApproval: $('no-approval').checked,
     position: Number.parseInt($('position').value, 10), stopOnFailure: $('stop-on-failure').checked,
@@ -111,6 +115,11 @@ function showParts() {
   const auth = $('auth').value;
   $('host-fields').hidden = place !== 'host';
   $('custom-fields').hidden = place !== 'custom';
+  // A host has a folder to name. On this computer the commands start in the app's own folder, set in Computer Activity.
+  $('folder-fields').hidden = place === 'local';
+  const repo = recipeFor(selected)?.repo || state.apps.find(app => app.id === selected)?.repo;
+  $('folder-hint').textContent = `Where this app’s code is on the host: a git checkout of ${repo ? `its repository (${repo})` : 'its repository'}. The commands start there. `
+    + 'Dry run checks that the folder is that checkout and that the host can pull without typing a password.';
   $('auth-hint').textContent = AUTH_HINT[auth] || '';
   $('identity-box').hidden = auth === 'ssh';
   $('key-box').hidden = auth !== 'key';
@@ -173,7 +182,10 @@ function fill(appId) {
   $('host-password').value = '';
   $('install-password').value = '';
   $('connect').value = recipe?.connect ?? '';
-  $('commands').value = recipe?.commands ?? '';
+  $('folder').value = recipe?.folder ?? '';
+  $('commands').value = recipe?.commands ?? FIRST_COMMAND;
+  suggested = undefined;
+  $('suggest-box').hidden = true;
   pick('log', recipe?.log?.mode ?? 'output');
   $('log-path').value = recipe?.log?.path ?? '';
   $('auto').checked = recipe ? recipe.auto : true;
@@ -205,7 +217,7 @@ function edited() {
     if (host.name !== recipe.host.name || host.user !== recipe.host.user || port !== recipe.host.port || host.auth !== recipe.host.auth ||
         host.keys.join('\n') !== recipe.host.keys.join('\n') || form.password !== '') return true;
   }
-  return form.connect.trim() !== recipe.connect || lines(form.commands) !== recipe.commands || form.log.mode !== recipe.log.mode ||
+  return form.connect.trim() !== recipe.connect || form.folder.trim().replace(/(.)\/+$/, '$1') !== (recipe.folder ?? '') || lines(form.commands) !== recipe.commands || form.log.mode !== recipe.log.mode ||
     (form.log.mode !== 'output' && form.log.path.trim() !== recipe.log.path) || form.auto !== recipe.auto || form.noApproval !== recipe.noApproval ||
     form.position !== recipe.position || form.stopOnFailure !== recipe.stopOnFailure;
 }
@@ -222,6 +234,7 @@ function enable() {
     $(id).title = changed ? 'Save your changes first: this uses the saved setup.' : '';
   }
   $('remove').disabled = !usable || !recipe;
+  renderSteps();
   const host = typedHost();
   const canInstallTarget = trusted.length > 0 && Boolean(host.user);
   $('check-host').disabled = !usable || !host.name || !host.user;
@@ -238,6 +251,72 @@ function enable() {
   $('remove').textContent = activeAction === 'remove' ? 'Removing…' : 'Remove';
 }
 
+const when = at => new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+
+/**
+ * What is left before a merged change can deploy by itself, for the selected app: saved, checked on the host, and
+ * run once for real. Each line says what to do next or what was found, so nobody has to guess whether it will work.
+ */
+function setupSteps(recipe, changed) {
+  if (!recipe) {
+    return [
+      { state: 'todo', name: 'Save the setup', text: 'Fill in where the commands run, the app folder and the commands, then choose Save.' },
+      { state: 'todo', name: 'Check it on the host', text: 'Dry run looks at the folder, git, the repository and your tools. It runs none of your commands.' },
+      { state: 'todo', name: 'Test a deploy', text: 'Run now pulls and builds once, so you know it works before a merge relies on it.' },
+    ];
+  }
+  if (recipe.stale) return [{ state: 'problem', name: 'Save it again', text: 'This was saved while the computer was connected differently, so it cannot run until you save it again.' }];
+  const remote = Boolean(recipe.host || recipe.connect);
+  const steps = [{
+    state: changed ? 'todo' : 'ok', name: changed ? 'Save your changes' : 'Saved on this computer',
+    text: changed ? 'The checks below are for the setup as it was last saved.'
+      : remote && !recipe.folder ? 'No app folder is set, so the commands start in the host user’s home folder and Dry run cannot check git there.' : '',
+  }];
+  const check = recipe.ready?.checked ?? 'todo';
+  steps.push(!remote && state.platform === 'windows'
+    ? { state: 'todo', name: 'Check it', text: 'A dry run needs a host or a Mac. On this computer, Run now is the test.' }
+    : check === 'ok' ? { state: 'ok', name: 'Checked on the host', text: `Dry run found nothing that would stop a deploy, ${when(recipe.lastCheck.at)}.` }
+      : check === 'problem' ? { state: 'problem', name: 'The host needs fixing', text: `Dry run found something that would stop a deploy, ${when(recipe.lastCheck.at)}. Fix it, then choose Dry run again.` }
+        : { state: 'todo', name: 'Check it on the host', text: 'Choose Dry run: it looks at the folder, git, the repository and your tools, and runs none of your commands.' });
+  const test = recipe.ready?.tested ?? 'todo';
+  steps.push(test === 'ok' ? { state: 'ok', name: 'Deploy tested', text: `These commands ran to the end, ${when(recipe.lastRun.at)}.` }
+    : test === 'problem' ? { state: 'problem', name: 'The last deploy did not finish', text: `${lastRunResult(recipe)}. Computer Activity has the output. Fix it, then choose Run now.` }
+      : { state: 'todo', name: 'Test a deploy', text: 'Choose Run now once: it pulls and builds for real, so you know it works before a merge relies on it.' });
+  steps.push({
+    state: recipe.auto ? (check === 'ok' && test === 'ok' ? 'ok' : 'todo') : 'todo',
+    name: recipe.auto ? 'Deploys when your change merges' : 'Deploys only when you start it',
+    text: !recipe.auto ? 'Turn on “Deploy when a change of mine merges” to deploy after each merge.'
+      : check === 'ok' && test === 'ok' ? (recipe.noApproval ? 'Runs without asking on this computer.' : 'This computer asks you first, then runs the commands.')
+        : 'It will be asked to, but the steps above are not done yet, so the first merge is also the first test.',
+  });
+  return steps;
+}
+
+function renderSteps() {
+  const recipe = recipeFor(selected);
+  const marks = { ok: '✓', problem: '!', todo: '○' };
+  const said = { ok: 'Done', problem: 'Needs attention', todo: 'To do' };
+  $('steps').hidden = !selected;
+  $('steps').replaceChildren(...setupSteps(recipe, Boolean(recipe) && edited()).map(step => {
+    const item = node('li');
+    item.dataset.state = step.state;
+    const mark = node('span', 'mark', marks[step.state]);
+    mark.setAttribute('aria-label', said[step.state]);
+    item.append(mark, node('span', 'step-name', step.name));
+    if (step.text) item.append(node('span', 'step-text', step.text));
+    return item;
+  }));
+}
+
+function showSuggestion() {
+  const shown = Boolean(suggested?.lines?.length);
+  $('suggest-box').hidden = !shown;
+  if (!shown) return;
+  $('suggest-text').textContent = `From what is in the app folder (${suggested.from.join(', ')}). Read them, change what does not fit, then Save.`
+    + (suggested.restart ? ' Then add the command that restarts your app, such as sudo systemctl restart my-app or pm2 reload my-app, if nothing here does that.' : '');
+  $('suggest-lines').textContent = suggested.lines.join('\n');
+}
+
 function lastRunLine(recipe) {
   if (recipe.stale) return 'Saved while this computer was connected differently. Save it again to use it.';
   const place = recipe.host ? `${recipe.host.user ? `${recipe.host.user}@` : ''}${recipe.host.name}` : recipe.connect ? 'a connect command' : 'this computer';
@@ -246,9 +325,8 @@ function lastRunLine(recipe) {
 
 function lastRunResult(recipe) {
   if (!recipe.lastRun) return 'Not run yet';
-  const when = new Date(recipe.lastRun.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
   const how = { done: 'Deployed', failed: 'Failed', timeout: 'Timed out', cancelled: 'Stopped', declined: 'Declined' }[recipe.lastRun.status] || 'Ended';
-  return `${how} ${when}${Number.isInteger(recipe.lastRun.exitCode) && recipe.lastRun.exitCode !== 0 ? ` · exit code ${recipe.lastRun.exitCode}` : ''}`;
+  return `${how} ${when(recipe.lastRun.at)}${Number.isInteger(recipe.lastRun.exitCode) && recipe.lastRun.exitCode !== 0 ? ` · exit code ${recipe.lastRun.exitCode}` : ''}`;
 }
 
 function render() {
@@ -457,8 +535,20 @@ window.addEventListener('DOMContentLoaded', () => {
     if (answer.ok) { fill(selected); say(answer.warning || 'Saved on this computer.', answer.warning ? 'error' : 'ok'); }
     else say(answer.cancelled ? 'Not saved.' : answer.error || 'Could not save.', answer.cancelled ? '' : 'error');
   });
+  $('suggest-use').addEventListener('click', () => {
+    if (!suggested?.lines?.length) return;
+    const current = $('commands').value.replace(/\s+$/, '');
+    $('commands').value = `${current}${current ? '\n' : ''}${suggested.lines.join('\n')}`;
+    suggested = undefined;
+    showSuggestion();
+    enable();
+    $('commands').focus();
+    say('Added. Read them, then Save.');
+  });
   $('dry-run').addEventListener('click', async () => {
     $('dry-output').hidden = true;
+    suggested = undefined;
+    showSuggestion();
     const answer = await act('dry-run', '1904:deploy-dry-run', selected);
     if (answer) say(answer.ok ? 'Checking on the host. Nothing is being run…' : answer.error || 'Could not start.', answer.ok ? '' : 'error');
   });
@@ -488,6 +578,9 @@ ipcRenderer.on('1904:deploy-dry-run-result', (_event, result) => {
   if (!result || result.appId !== selected) return;
   $('dry-output').textContent = result.output || 'The host said nothing.';
   $('dry-output').hidden = false;
+  // Only fixed lines the main process chose from what the folder holds: text, never markup, and never added without a click.
+  suggested = result.suggested && Array.isArray(result.suggested.lines) ? result.suggested : undefined;
+  showSuggestion();
   say(result.ok ? 'Dry run: nothing found that would stop a deploy.' : 'Dry run: something would stop a deploy. See below.', result.ok ? 'ok' : 'error');
 });
 ipcRenderer.on('1904:deploy-theme', (_event, theme) => {

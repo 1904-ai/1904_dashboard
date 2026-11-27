@@ -722,7 +722,11 @@ function createComputerBridge({
       // Computer Activity keeps how the commands themselves ended; 1904 hears whether the deploy counts as done.
       close(entry, outcome.status, { exitCode: result.exitCode, message: result.message, durationMs: outcome.durationMs });
       // A dry run deployed nothing, so it is not the app's last deploy.
-      if (!request.dryRun) { try { deploys.noteRun(request.app.id, { status: result.status, sha: request.sha, exitCode: result.exitCode }); } catch { /* a record only */ } }
+      // What it found is kept beside the recipe instead, for the window's checklist.
+      try {
+        if (request.dryRun) deploys.noteCheck?.(request.app.id, { ok: result.status === 'done' });
+        else deploys.noteRun(request.app.id, { status: result.status, sha: request.sha, exitCode: result.exitCode });
+      } catch { /* a record only */ }
       onNotice({ kind: request.dryRun ? 'dry-run-finished' : 'deploy-finished', request, status: result.status, exitCode: result.exitCode, output: request.dryRun ? result.output : undefined });
       if (!request.local) {
         await reportDeploy(deployPolicy.deployUpdate({

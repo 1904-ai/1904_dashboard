@@ -18,6 +18,7 @@ const DEPLOY_CONNECT_MAX = 300;
 const DEPLOY_COMMANDS_MAX = 2200;
 const DEPLOY_COMMAND_LINES = 40;
 const DEPLOY_LOG_PATH_MAX = 200;
+const DEPLOY_FOLDER_MAX = 200;
 /** output: what the commands print. file: a log the commands write on the host. write: 1904 Desktop writes that log. */
 const DEPLOY_LOG_MODES = Object.freeze(['output', 'file', 'write']);
 /** The end of the host's log that comes back, in bytes: it has to fit inside the output that is kept. */
@@ -47,6 +48,9 @@ const NONCE = /^[a-f0-9]{16}$/;
 // A log path is written into a shell script, so it holds nothing a shell reads as syntax.
 const LOG_PATH = /^(?:~\/|\/)[A-Za-z0-9._/@%+=:,-]+$/;
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+// The app's repository as 1904 names it. It is compared inside a shell script, so it holds nothing a shell reads as syntax.
+const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
+const FOLDER_ERROR = 'Name the app folder as a full path on the host, such as /srv/my-app or ~/my-app, without spaces or quotes.';
 const appKey = key => typeof key === 'string' && REF.test(key) && !['__proto__', 'constructor', 'prototype'].includes(key);
 
 const NO_RECIPE = 'This computer has no deploy commands saved for this app. Choose Deploy From This Computer in 1904 Desktop’s 1904 menu.';
@@ -70,6 +74,12 @@ function cleanRecipe(value) {
   if (/[\r\n]/.test(connect) || CONTROL.test(connect)) return fail('Write how to connect on one line.');
   if (connect.length > DEPLOY_CONNECT_MAX) return fail(`Write how to connect in up to ${DEPLOY_CONNECT_MAX} characters.`);
   if (connect.endsWith('\\')) return fail('The connect line cannot end with a backslash.');
+  // Where the app's code is on the host: the commands start there. On this computer they start in the app's own folder instead.
+  let folder = '';
+  if (host || connect) {
+    folder = typeof value.folder === 'string' ? value.folder.trim().replace(/(.)\/+$/, '$1') : '';
+    if (folder && (folder.length > DEPLOY_FOLDER_MAX || !LOG_PATH.test(folder) || folder.includes('..'))) return fail(FOLDER_ERROR);
+  }
   const commands = typeof value.commands === 'string' ? value.commands.replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').replace(/^\n+|\n+$/g, '') : '';
   if (!commands.trim()) return fail('Add at least one command.');
   if (CONTROL.test(commands)) return fail('The commands contain a character that cannot be shown. Type them again.');
@@ -86,7 +96,7 @@ function cleanRecipe(value) {
   }
   const position = Number.isSafeInteger(value.position) ? Math.min(DEPLOY_POSITION.max, Math.max(DEPLOY_POSITION.min, value.position)) : DEPLOY_POSITION.default;
   const recipe = {
-    ...(host ? { host } : {}), connect, commands, log: { mode, path: logPath },
+    ...(host ? { host } : {}), connect, ...(folder ? { folder } : {}), commands, log: { mode, path: logPath },
     auto: value.auto !== false, noApproval: value.noApproval === true, position, stopOnFailure: value.stopOnFailure === true,
   };
   // Measured the way the prompt shows it: an invisible character is spelled out there and takes more room.
@@ -94,10 +104,12 @@ function cleanRecipe(value) {
   return { ok: true, recipe };
 }
 
-/** Changes when anything that decides what runs changes: the connect line, the commands or the log. */
+/** Changes when anything that decides what runs changes: the connect line, the app folder, the commands or the log. */
 function recipeHash(recipe) {
   const host = recipe.host ? [recipe.host.name, recipe.host.user, recipe.host.port ?? null, recipe.host.auth, recipe.host.keys] : null;
-  return createHash('sha256').update(JSON.stringify([recipe.connect, recipe.commands, recipe.log?.mode ?? 'output', recipe.log?.path ?? '', ...(host ? [host] : [])])).digest('hex');
+  // A recipe without a folder keeps the hash it had before folders existed, so nothing saved earlier asks again.
+  return createHash('sha256').update(JSON.stringify([recipe.connect, recipe.commands, recipe.log?.mode ?? 'output', recipe.log?.path ?? '',
+    ...(host ? [host] : []), ...(recipe.folder ? [{ folder: recipe.folder }] : [])])).digest('hex');
 }
 
 /** Whether the commands run on a host rather than on this computer. */
@@ -108,7 +120,7 @@ function recipeText(recipe) {
   const log = recipe.log?.mode === 'write' ? `\n\n# 1904 Desktop writes the output to this log on the host\n${recipe.log.path}`
     : recipe.log?.mode === 'file' ? `\n\n# then reads the end of this log on the host\n${recipe.log.path}` : '';
   return isRemote(recipe)
-    ? `# connect\n${recipe.host ? hostText(recipe.host) : recipe.connect}\n\n# then run on the host, stopping at the first command that fails\n${recipe.commands}${log}`
+    ? `# connect\n${recipe.host ? hostText(recipe.host) : recipe.connect}\n\n# then run ${recipe.folder ? `in ${recipe.folder} ` : ''}on the host, stopping at the first command that fails\n${recipe.commands}${log}`
     : `${recipe.commands}${log}`;
 }
 
@@ -135,6 +147,8 @@ function deployScript({ recipe, sha = '', branch = '', nonce }) {
     '__1904_run() {',
     '(',
     'set -e',
+    // The commands start in the app's folder. A folder that is not there ends the deploy before any of them.
+    ...(recipe.folder ? [`cd ${logExpression(recipe.folder)} || { echo "The app folder is not on the host: ${recipe.folder}" >&2; exit 66; }`] : []),
     recipe.commands,
     ')',
     '}',
@@ -219,6 +233,94 @@ function commandTools(commands) {
   return [...tools].slice(0, 20);
 }
 
+/** What the app folder check looks for, to suggest the build commands that usually go with it (suggestCommands). */
+const FOLDER_SIGNS = Object.freeze(['deploy.sh', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'Dockerfile',
+  'package.json', 'pnpm-lock.yaml', 'yarn.lock', 'package-lock.json', 'bun.lockb', 'bun.lock', 'Makefile']);
+const FOUND_PREFIX = 'Found in the app folder:';
+/** Takes a user name, password or token out of a repository address before it is shown. */
+const HIDE_SIGN_IN = "sed 's#://[^/@]*@#://#'";
+
+/**
+ * The dry run's look at the app folder, for a recipe that names one: that the folder is there and is a git checkout,
+ * where its `origin` points (compared with the name 1904 has for the app's repository), that the host can read that
+ * origin without anyone typing a password or passphrase, which is what a pull in a deploy needs, and whether files
+ * there were changed by hand. It reads from the repository and changes nothing. The dry run goes on from inside the folder.
+ */
+function folderChecks(recipe) {
+  if (!recipe.folder) return [];
+  const repo = REPO_NAME.test(recipe.repo ?? '') ? recipe.repo.toLowerCase() : '';
+  return [
+    `__1904_dir=${logExpression(recipe.folder)}`,
+    'if [ -d "$__1904_dir" ] && cd "$__1904_dir"; then',
+    'echo "The app folder is there: $__1904_dir"',
+    'if ! command -v git >/dev/null 2>&1; then echo "MISSING: git is not installed for this user, so the code cannot be pulled here"; __1904_bad=1',
+    'elif ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo "NOT A CHECKOUT: the app folder is not a git checkout. Clone the repository into it on the host first."; __1904_bad=1',
+    'else',
+    'echo "It is a git checkout, on branch $(git rev-parse --abbrev-ref HEAD 2>/dev/null) at $(git rev-parse --short HEAD 2>/dev/null)."',
+    `__1904_origin=$(git remote get-url origin 2>/dev/null | ${HIDE_SIGN_IN})`,
+    'if [ -z "$__1904_origin" ]; then echo "NO ORIGIN: this checkout has no remote named origin, so git pull has nowhere to pull from."; __1904_bad=1',
+    'else',
+    ...(repo ? [
+      `__1904_name=$(printf %s "$__1904_origin" | sed -e 's#/*$##' -e 's#\\.git$##' -e 's#.*[/:]##' | tr 'A-Z' 'a-z')`,
+      `if [ "$__1904_name" = '${repo}' ]; then echo "origin is this app's repository: $__1904_origin"; else echo "CHECK: origin is $__1904_origin, but 1904 knows this app's repository as ${repo}. Make sure this folder is that repository."; fi`,
+    ] : ['echo "origin: $__1904_origin"']),
+    // Nobody is there to type in a deploy, so every way git or ssh could ask is turned off for this one read.
+    'if command -v timeout >/dev/null 2>&1; then __1904_wait="timeout 40"; else __1904_wait=""; fi',
+    'if __1904_said=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true SSH_ASKPASS=true GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes -o ConnectTimeout=15" $__1904_wait git ls-remote --heads origin 2>&1 >/dev/null </dev/null); then',
+    'echo "The host can read origin without typing anything, so git pull will not stop to ask."',
+    'else',
+    'echo "CANNOT PULL: the host could not read origin without a password or passphrase. Save git credentials for this user on the host, or give the host a deploy key for the repository."',
+    `printf '%s\\n' "$__1904_said" | ${HIDE_SIGN_IN} | tail -2`,
+    '__1904_bad=1',
+    'fi',
+    'fi',
+    '__1904_dirty=$(git status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d " ")',
+    'if [ "${__1904_dirty:-0}" != 0 ]; then echo "CHECK: $__1904_dirty changed files in the app folder are not committed. git pull stops when a merged change touches one of them."; fi',
+    'fi',
+    '__1904_found=""',
+    `for __1904_f in ${FOLDER_SIGNS.join(' ')}; do if [ -f "$__1904_f" ]; then __1904_found="$__1904_found $__1904_f"; fi; done`,
+    `if [ -f package.json ] && grep -q '"build"[[:space:]]*:' package.json 2>/dev/null; then __1904_found="$__1904_found script:build"; fi`,
+    `if [ -n "$__1904_found" ]; then echo "${FOUND_PREFIX}$__1904_found"; fi`,
+    'else',
+    'echo "NO FOLDER: the app folder is not on the host: $__1904_dir"',
+    '__1904_bad=1',
+    'fi',
+  ];
+}
+
+/**
+ * Build commands that usually go with what the dry run found in the app folder, for the person to read, change and
+ * save: never run or saved by themselves. Only names from FOLDER_SIGNS count, and each maps to fixed text here, so
+ * nothing a host prints can become a command. Leaves out what the saved commands already have. `undefined` when there
+ * is nothing to add.
+ */
+function suggestCommands(output, commands = '') {
+  const line = String(output ?? '').split(/\r?\n/).find(text => text.startsWith(FOUND_PREFIX));
+  const found = new Set((line ?? '').slice(FOUND_PREFIX.length).trim().split(/\s+/).filter(name => FOLDER_SIGNS.includes(name) || name === 'script:build'));
+  if (!found.size) return undefined;
+  const has = (...names) => names.some(name => found.has(name));
+  const build = found.has('script:build');
+  const steps = [];
+  if (has('deploy.sh')) steps.push('sh ./deploy.sh');
+  else if (has('docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml')) steps.push('docker compose up -d --build');
+  else if (has('package.json')) {
+    if (has('pnpm-lock.yaml')) steps.push('pnpm install --frozen-lockfile', ...(build ? ['pnpm run build'] : []));
+    else if (has('yarn.lock')) steps.push('yarn install --frozen-lockfile', ...(build ? ['yarn build'] : []));
+    else if (has('bun.lockb', 'bun.lock')) steps.push('bun install --frozen-lockfile', ...(build ? ['bun run build'] : []));
+    else if (has('package-lock.json')) steps.push('npm ci', ...(build ? ['npm run build'] : []));
+    else steps.push('npm install', ...(build ? ['npm run build'] : []));
+  } else if (has('Makefile')) steps.push('make');
+  const saved = String(commands).split('\n').map(text => text.trim());
+  const pulls = saved.some(text => /^(?:sudo\s+)?git\s+(?:pull|fetch|merge|reset|checkout|switch)\b/.test(text));
+  const lines = [...(pulls ? [] : ['git pull --ff-only']), ...steps].filter(step => !saved.includes(step));
+  if (!lines.length) return undefined;
+  return {
+    lines, from: [...found].filter(name => name !== 'script:build'),
+    // Building is rarely the last step: whatever serves the app has to pick the new build up.
+    restart: !/\b(?:systemctl|service|pm2|supervisorctl|docker|podman|kubectl|nginx|passenger-config)\b/.test([...saved, ...lines].join('\n')),
+  };
+}
+
 /**
  * A dry run: what can be checked where the commands would run, without running any of them. That the
  * connection works and as whom; that the host has what the script itself needs and the programs the
@@ -233,6 +335,7 @@ function preflightScript({ recipe, nonce }) {
   const lines = [
     '__1904_bad=0',
     'echo "Connected as $(id -un 2>/dev/null || echo unknown) on $(hostname 2>/dev/null || echo this host)."',
+    ...folderChecks(recipe),
     ...['sh', 'base64', ...commandTools(recipe.commands)].map(tool =>
       `if command -v ${tool} >/dev/null 2>&1; then echo "found: ${tool}"; else echo "MISSING: ${tool} is not installed for this user"; __1904_bad=1; fi`),
     `if echo ${Buffer.from(recipe.commands + '\n', 'utf8').toString('base64')} | base64 -d | sh -n; then echo "The commands parse."; else echo "The commands do not parse: see the error above."; __1904_bad=1; fi`,
@@ -404,11 +507,14 @@ function storedRecipe(appId, value) {
   const checked = cleanRecipe(value);
   if (!checked.ok || !computerId(value.computerId)) return undefined;
   const recipe = { appId, appName: label(value.appName) || 'App', repo: label(value.repo) || '', computerId: value.computerId, ...checked.recipe };
+  const ranWith = entry => typeof entry.hash === 'string' && /^[a-f0-9]{64}$/.test(entry.hash) ? { hash: entry.hash } : {};
   const lastRun = value.lastRun && typeof value.lastRun === 'object' && Number.isFinite(value.lastRun.at) ? {
     at: value.lastRun.at, status: label(String(value.lastRun.status ?? ''), 20) || '', sha: SHA.test(value.lastRun.sha) ? value.lastRun.sha : '',
-    exitCode: Number.isSafeInteger(value.lastRun.exitCode) ? value.lastRun.exitCode : null,
+    exitCode: Number.isSafeInteger(value.lastRun.exitCode) ? value.lastRun.exitCode : null, ...ranWith(value.lastRun),
   } : undefined;
-  return { ...recipe, hash: recipeHash(recipe), updatedAt: Number.isFinite(value.updatedAt) ? value.updatedAt : 0, ...(lastRun ? { lastRun } : {}) };
+  const lastCheck = value.lastCheck && typeof value.lastCheck === 'object' && Number.isFinite(value.lastCheck.at)
+    ? { at: value.lastCheck.at, ok: value.lastCheck.ok === true, ...ranWith(value.lastCheck) } : undefined;
+  return { ...recipe, hash: recipeHash(recipe), updatedAt: Number.isFinite(value.updatedAt) ? value.updatedAt : 0, ...(lastRun ? { lastRun } : {}), ...(lastCheck ? { lastCheck } : {}) };
 }
 
 /**
@@ -455,7 +561,9 @@ function createDeployRecipes({ file, now = Date.now }) {
       if (!recipes.has(appId) && recipes.size >= DEPLOY_RECIPES_MAX) return { ok: false, error: `This computer can keep deploy commands for ${DEPLOY_RECIPES_MAX} apps. Remove one first.` };
       const previous = recipes.get(appId);
       const recipe = { appId, appName: label(appName) || previous?.appName || 'App', repo: label(repo) || previous?.repo || '', computerId: pairedId, ...checked.recipe };
-      const stored = { ...recipe, hash: recipeHash(recipe), updatedAt: now(), ...(previous?.lastRun ? { lastRun: previous.lastRun } : {}) };
+      // What the last run and the last dry run found stays, each with the hash it was found for: recipeReadiness
+      // counts one only while the saved setup is still that one.
+      const stored = { ...recipe, hash: recipeHash(recipe), updatedAt: now(), ...(previous?.lastRun ? { lastRun: previous.lastRun } : {}), ...(previous?.lastCheck ? { lastCheck: previous.lastCheck } : {}) };
       recipes.set(appId, stored);
       save();
       return { ok: true, recipe: { ...stored, log: { ...stored.log } } };
@@ -471,8 +579,16 @@ function createDeployRecipes({ file, now = Date.now }) {
       load();
       const recipe = recipes.get(appId);
       if (!recipe) return;
-      recipe.lastRun = { at: now(), status: String(run.status ?? ''), sha: SHA.test(run.sha) ? run.sha : '', exitCode: Number.isSafeInteger(run.exitCode) ? run.exitCode : null };
+      recipe.lastRun = { at: now(), status: String(run.status ?? ''), sha: SHA.test(run.sha) ? run.sha : '', exitCode: Number.isSafeInteger(run.exitCode) ? run.exitCode : null, hash: recipe.hash };
       try { save(); } catch { /* a record, never a reason to fail a deploy */ }
+    },
+    /** Whether the last dry run of an app's recipe found nothing that would stop a deploy. */
+    noteCheck(appId, check) {
+      load();
+      const recipe = recipes.get(appId);
+      if (!recipe) return;
+      recipe.lastCheck = { at: now(), ok: check?.ok === true, hash: recipe.hash };
+      try { save(); } catch { /* a record only */ }
     },
     /** Disconnect: nothing runs without asking again until the person saves it under a new pairing. */
     disarm() {
@@ -484,19 +600,34 @@ function createDeployRecipes({ file, now = Date.now }) {
   };
 }
 
+/**
+ * How far a saved setup has been proven, for the window's checklist. `checked`: what the last dry run found.
+ * `tested`: how the last real run ended. Each is 'ok' or 'problem' only for the setup as it is saved now: after any
+ * change to the host, the folder, the commands or the log it is 'todo' again, because that was another setup.
+ */
+function recipeReadiness(recipe) {
+  const current = entry => Boolean(entry) && entry.hash === recipe.hash;
+  return {
+    checked: current(recipe.lastCheck) ? (recipe.lastCheck.ok ? 'ok' : 'problem') : 'todo',
+    tested: current(recipe.lastRun) ? (recipe.lastRun.status === 'done' ? 'ok' : 'problem') : 'todo',
+  };
+}
+
 /** A recipe as the deploy window shows it. Text is spelled out the way a prompt would show it. */
 function recipeView(recipe, pairedId) {
   return {
-    appId: recipe.appId, appName: visibleLine(recipe.appName), connect: recipe.connect, commands: recipe.commands, log: { ...recipe.log },
+    appId: recipe.appId, appName: visibleLine(recipe.appName), repo: REPO_NAME.test(recipe.repo ?? '') ? recipe.repo : '',
+    connect: recipe.connect, folder: recipe.folder ?? '', commands: recipe.commands, log: { ...recipe.log },
     ...(recipe.host ? { host: { ...recipe.host, keys: [...recipe.host.keys] }, fingerprints: Object.fromEntries(recipe.host.keys.map(line => [line, fingerprint(line)])) } : {}),
     auto: recipe.auto, noApproval: recipe.noApproval && recipe.computerId === pairedId, position: recipe.position, stopOnFailure: recipe.stopOnFailure,
     stale: recipe.computerId !== pairedId, updatedAt: recipe.updatedAt, ...(recipe.lastRun ? { lastRun: { ...recipe.lastRun } } : {}),
+    ...(recipe.lastCheck ? { lastCheck: { ...recipe.lastCheck } } : {}), ready: recipeReadiness(recipe),
   };
 }
 
 module.exports = {
-  DEPLOYS_PATH, RECIPES_FILE, DEPLOY_CONNECT_MAX, DEPLOY_COMMANDS_MAX, DEPLOY_COMMAND_LINES, DEPLOY_LOG_PATH_MAX, DEPLOY_LOG_MODES,
+  DEPLOYS_PATH, RECIPES_FILE, DEPLOY_CONNECT_MAX, DEPLOY_COMMANDS_MAX, DEPLOY_COMMAND_LINES, DEPLOY_LOG_PATH_MAX, DEPLOY_FOLDER_MAX, DEPLOY_LOG_MODES,
   DEPLOY_LOG_TAIL_BYTES, DEPLOY_TIMEOUT_SECONDS, DEPLOY_WAIT_MAX_MS, DEPLOY_PROMPT_MS, POWERSHELL_STOP, validBranch, DEPLOY_POSITION, DEPLOY_RECIPES_MAX, DEPLOY_FINAL_STATUSES, NO_RECIPE, UNCONFIRMED_RUN,
   cleanRecipe, recipeHash, recipeText, isRemote, deployScript, preflightScript, commandTools, scriptWord, deployPlan, deployEnvironment, readDeployOutput, deployOutcome,
-  validateDeploy, deployRequest, deployUpdate, recipeRegistration, noApprovalPrompt, createDeployRecipes, recipeView,
+  validateDeploy, deployRequest, deployUpdate, recipeRegistration, noApprovalPrompt, createDeployRecipes, recipeView, recipeReadiness, suggestCommands,
 };
