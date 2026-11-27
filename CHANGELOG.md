@@ -12,6 +12,10 @@
 - **Run now** starts an app’s saved commands from the window, once the form shows exactly what is saved. Every deploy shows in Computer Activity with its output and a Stop button.
 - A deploy prompt nobody answers closes after 30 minutes, so it never holds other prompts for hours.
 - Pause stops deploys from 1904 too, and Disconnect turns “Submit without approval” off for every app.
+- **App folder on the host**: name the folder the app’s code is in, and the commands start there. A folder that is missing ends the deploy before any command runs.
+- **Dry run checks git too**: that the folder is a git checkout, that its `origin` is the app’s repository, that the host can pull without typing a password or passphrase, and whether files there were changed by hand. A repository address is shown without any user name or token in it.
+- **Suggested commands**: after a dry run, the window offers the build commands that usually go with what the folder holds (a `deploy.sh`, a compose file, npm, pnpm, yarn or bun with a build script, a Makefile). You add them with a click, read them and save; nothing is added or run by itself.
+- **A checklist for each app**: saved, checked on the host, tested with one real run, and whether it deploys when your change merges. A check or a test counts only for the setup as it is saved now, so any change to the host, folder, commands or log asks for it again. A new setup starts with `git pull --ff-only`.
 - **Settings → 1904 Desktop**: in 1904 Desktop, the dashboard’s Settings (the gear) now has a page for this computer: connect it, pause and resume, open Computer Activity and Deploy From This Computer, choose the task browser, and see the version or check for updates. The page can pause at once; turning Pause off asks you in a 1904 Desktop dialog first. The 1904 menu keeps the same commands, so Pause and Disconnect still work when the dashboard cannot load.
 
 ## 0.4.0

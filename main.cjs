@@ -1311,10 +1311,15 @@ function onComputerNotice(notice) {
   } else if (notice.kind === 'dry-run-finished') {
     // Shown in the deploy window, where the person is: what the host said, and whether anything would stop a deploy.
     if (deployWindow && !deployWindow.isDestroyed()) {
+      const checked = deployRecipes?.all().find(recipe => recipe.appId === notice.request.app.id);
       deployWindow.webContents.send('1904:deploy-dry-run-result', {
         appId: notice.request.app.id, ok: notice.status === 'done', output: computerPolicy.visibleText(String(notice.output ?? '').slice(-8000)),
+        // Build commands that usually go with what the folder holds, for the person to read and save themselves.
+        suggested: checked ? computerDeploy.suggestCommands(notice.output, checked.commands) : undefined,
       });
     }
+    // The checklist in the window shows what this dry run found.
+    sendDeployState();
   }
   computerChanged();
 }
@@ -1885,7 +1890,7 @@ function showDeploys() {
     return deployWindow;
   }
   const win = new BrowserWindow({
-    title: 'Deploy From This Computer', icon: ICON, width: 720, height: 780, minWidth: 460, minHeight: 420,
+    title: 'Deploy From This Computer', icon: ICON, width: 900, height: 800, minWidth: 520, minHeight: 440,
     backgroundColor: PALETTE[activeTheme()].color, autoHideMenuBar: true, show: false,
     webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'deploy-preload.cjs') },
   });
@@ -1906,7 +1911,8 @@ function deployState() {
   return {
     platform: computerPlatform(),
     connection: { connected: Boolean(info), text: info ? `Connected to 1904 as ${info.name}.${connection.paused ? ' Use My Computer is paused, so nothing from 1904 runs until you resume it.' : ''}` : connection.text },
-    apps: [...deployApps.values()].map(appRef => ({ id: appRef.id, name: computerPolicy.visibleLine(appRef.name) })),
+    // The repository's name goes along so the window can say which checkout the app folder should be. Only a plain name is shown.
+    apps: [...deployApps.values()].map(appRef => ({ id: appRef.id, name: computerPolicy.visibleLine(appRef.name), repo: /^[A-Za-z0-9._-]{1,100}$/.test(appRef.repo ?? '') ? appRef.repo : '' })),
     recipes: (deployRecipes?.all() ?? []).map(recipe => computerDeploy.recipeView(recipe, info?.id)),
     // Whether a password or a deploy key is kept for each app, and the key's public half. Never a secret.
     kept: Object.fromEntries([...new Set([...deployApps.keys(), ...(deployRecipes?.all() ?? []).map(recipe => recipe.appId)])].map(appId => {

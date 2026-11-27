@@ -5,45 +5,88 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'">
   <title>Deploy From This Computer</title>
   <style>
-    :root { color-scheme: dark; --canvas: #121416; --panel: #181b1e; --text: #e2e7ec; --muted: #9aa5b0; --line: #ffffff18;
-      --hover: #ffffff14; --edge: #ffffff38; --code: #0b0d0f; --run: #5cc489; --wait: #d9a441; --bad: #e5706b; --focus: #7ab7ff; }
-    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --panel: #ffffff; --text: #20262d; --muted: #59636e; --line: #00000016;
-      --hover: #0000000c; --edge: #00000030; --code: #eef1f4; --run: #1f7a46; --wait: #8a5d00; --bad: #b42318; --focus: #0b62d6; }
+    :root { color-scheme: dark; --canvas: #121416; --panel: #181b1e; --raised: #1f2327; --field: #121416; --text: #e2e7ec; --muted: #9aa5b0; --line: #ffffff18;
+      --hover: #ffffff14; --edge: #ffffff38; --code: #0b0d0f; --run: #5cc489; --run-bg: #5cc48918; --run-edge: #5cc48955;
+      --wait: #d9a441; --wait-bg: #d9a44118; --wait-edge: #d9a44155; --bad: #e5706b; --bad-bg: #e5706b1a; --bad-edge: #e5706b5c;
+      --focus: #7ab7ff; --info-bg: #7ab7ff16; --info-edge: #7ab7ff52; }
+    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --panel: #ffffff; --raised: #f0f3f6; --field: #ffffff; --text: #20262d; --muted: #59636e; --line: #00000016;
+      --hover: #0000000c; --edge: #00000030; --code: #eef1f4; --run: #1f7a46; --run-bg: #1f7a4612; --run-edge: #1f7a464a;
+      --wait: #8a5d00; --wait-bg: #f5c34d24; --wait-edge: #8a5d004a; --bad: #b42318; --bad-bg: #b423180f; --bad-edge: #b423184a;
+      --focus: #0b62d6; --info-bg: #0b62d610; --info-edge: #0b62d645; }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--canvas); color: var(--text); font: 400 13px/1.45 system-ui, sans-serif; }
-    header { position: sticky; top: 0; z-index: 1; padding: 14px 18px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
+    header { position: sticky; top: 0; z-index: 1; padding: 14px 24px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
     h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
     #connection { margin: 4px 0 0; color: var(--muted); }
-    main { padding: 4px 18px 24px; max-width: 760px; }
+    main { padding: 4px 24px 28px; max-width: 960px; }
     h2 { margin: 18px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
-    .hint { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .hint { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
     [hidden] { display: none !important; }
     .field { display: block; margin: 12px 0 0; }
-    .field > span:first-child, legend { display: block; margin: 0 0 4px; padding: 0; font-weight: 600; }
+    .field > span:first-child, legend { display: block; margin: 0 0 5px; padding: 0; font-weight: 600; }
     input[type="text"], input[type="password"], input[type="number"], textarea, select { width: 100%; color: inherit; background: var(--panel); border: 1px solid var(--edge);
-      border-radius: 6px; padding: 6px 8px; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      border-radius: 6px; padding: 7px 9px; font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .box input[type="password"], .box input[type="text"] { background: var(--field); }
     select { font: inherit; }
-    input[type="number"] { width: 72px; }
+    input[type="number"] { width: 76px; }
     textarea { min-height: 150px; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4; }
     fieldset { margin: 14px 0 0; padding: 0; border: 0; min-width: 0; }
     .choice { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; align-items: start; margin: 6px 0 0; }
     .choice input { margin: 3px 0 0; }
     .choice .hint { grid-column: 2; margin: 0; }
+    .choice:has(> input:disabled) { opacity: .6; }
     .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-    .row .field { flex: 0 1 170px; }
-    .row .grow { flex: 1 1 220px; min-width: 0; }
+    .row .field { flex: 0 1 200px; }
+    .row .grow { flex: 1 1 260px; min-width: 0; }
     .row button { flex: none; }
-    .row .narrow { flex: 0 0 84px; }
+    .row .narrow { flex: 0 0 88px; }
     .row .narrow input { width: 100%; }
-    .box { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .inline-row { display: flex; gap: 8px; align-items: stretch; }
+    .inline-row input { flex: 1 1 auto; min-width: 0; }
+    .inline-row button { flex: none; }
+    .box { margin: 12px 0 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
     .box .field:first-child { margin-top: 0; }
-    .box-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .box-title { font-weight: 600; }
+    .box-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .box-title-wrap { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+    .box-title { font-weight: 600; font-size: 13.5px; }
+    .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+      border: 1px solid var(--run-edge); background: var(--run-bg); color: var(--run); }
+    .badge svg { width: 12px; height: 12px; flex: none; }
     .prints { margin: 6px 0 0; gap: 4px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
     #trust-host { margin-top: 8px; }
-    pre { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--code); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; }
-    button.link { border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; color: inherit; font: inherit; }
+    .feedback { margin: 10px 0 0; padding: 9px 12px; border-radius: 7px; border: 1px solid var(--line); display: flex; align-items: flex-start; gap: 9px;
+      font-size: 12.5px; line-height: 1.45; }
+    .feedback .fb-icon { width: 16px; height: 16px; flex: none; margin-top: 1px; display: none; }
+    .feedback[data-kind="pending"] { background: var(--info-bg); border-color: var(--info-edge); }
+    .feedback[data-kind="pending"] .fb-pending { display: block; color: var(--focus); }
+    .feedback[data-kind="ok"] { background: var(--run-bg); border-color: var(--run-edge); }
+    .feedback[data-kind="ok"] .fb-ok { display: block; color: var(--run); }
+    .feedback[data-kind="ok"] .feedback-title { color: var(--run); }
+    .feedback[data-kind="error"] { background: var(--bad-bg); border-color: var(--bad-edge); }
+    .feedback[data-kind="error"] .fb-error { display: block; color: var(--bad); }
+    .feedback[data-kind="error"] .feedback-title { color: var(--bad); }
+    .feedback-body { min-width: 0; }
+    .feedback-title { font-weight: 600; display: block; overflow-wrap: anywhere; }
+    .feedback-detail { display: block; margin-top: 2px; color: var(--text); opacity: .86; overflow-wrap: anywhere; }
+    .btn-spin { width: 13px; height: 13px; flex: none; display: none; }
+    button[aria-busy="true"] .btn-spin { display: inline-block; }
+    @media (prefers-reduced-motion: no-preference) {
+      .icon-spin { animation: spin .9s linear infinite; }
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    pre { margin: 8px 0 0; padding: 9px 11px; border-radius: 6px; background: var(--code); border: 1px solid var(--line);
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; }
+    .steps { list-style: none; margin: 12px 0 0; padding: 4px 12px; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .steps li { display: grid; grid-template-columns: 18px 1fr; gap: 0 8px; align-items: baseline; padding: 6px 0; }
+    .steps li + li { border-top: 1px solid var(--line); }
+    .steps .mark { font-weight: 700; text-align: center; color: var(--muted); }
+    .steps li[data-state="ok"] .mark { color: var(--run); }
+    .steps li[data-state="problem"] .mark { color: var(--bad); }
+    .steps .step-name { font-weight: 600; }
+    .steps .step-text { grid-column: 2; color: var(--muted); font-size: 12px; }
+    #suggest-use { margin-top: 8px; }
+    button.link { border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; color: var(--text); font: inherit; background: transparent; min-width: 0; }
+    button.link[data-copied="true"] { color: var(--run); text-decoration: none; font-weight: 600; }
     .order { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; flex-wrap: wrap; }
     .actions { display: flex; align-items: center; gap: 8px; margin: 18px 0 0; flex-wrap: wrap; }
     .actions .spacer { flex: 1; }
@@ -57,13 +100,17 @@
     .saved-detail { flex: 1 1 240px; color: var(--muted); }
     .saved[data-last="failed"] .saved-last, .saved[data-last="timeout"] .saved-last { color: var(--bad); }
     .saved[data-last="done"] .saved-last { color: var(--run); }
-    button { font: 550 12px system-ui, sans-serif; color: inherit; background: transparent; border: 1px solid var(--edge); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+    button { font: 550 12.5px system-ui, sans-serif; color: inherit; background: transparent; border: 1px solid var(--edge); border-radius: 6px; padding: 6px 13px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+    button.action { background: var(--raised); font-weight: 600; min-width: 108px; }
     button.primary { background: var(--text); color: var(--canvas); border-color: var(--text); }
     button:hover:not(:disabled), button:focus-visible { background: var(--hover); }
+    button.action:hover:not(:disabled) { background: var(--hover); }
     button.primary:hover:not(:disabled) { background: var(--text); opacity: .88; }
     button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
-    button:disabled, fieldset:disabled { opacity: .5; cursor: default; }
-    @media (forced-colors: active) { .saved, .warn, input, textarea, select { border: 1px solid CanvasText; } }
+    button:disabled, input:disabled, textarea:disabled, select:disabled { opacity: .52; cursor: default; }
+    button[aria-busy="true"]:disabled { opacity: .82; }
+    @media (forced-colors: active) { .saved, .warn, .feedback, .badge, input, textarea, select { border: 1px solid CanvasText; } }
   </style>
 </head>
 <body>
@@ -81,6 +128,7 @@
           <select id="app"></select>
         </label>
         <p class="hint" id="apps-empty" hidden>No apps to show yet. Apps you can work on in 1904 appear here.</p>
+        <ol class="steps" id="steps" aria-label="Setup for this app"></ol>
         <fieldset>
           <legend>Where the commands run</legend>
           <label class="choice"><input type="radio" name="where" value="host" checked><span>On a host, over SSH</span></label>
@@ -109,19 +157,63 @@
           </label>
           <p class="hint" id="auth-hint"></p>
           <div class="box" id="identity-box">
-            <div class="box-head"><span class="box-title">Host identity</span><button type="button" id="check-host">Check host</button></div>
+            <div class="box-head">
+              <span class="box-title-wrap"><span class="box-title">Host identity</span></span>
+              <button type="button" id="check-host" aria-busy="false">
+                <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                <span id="check-host-label">Check host</span>
+              </button>
+            </div>
             <p class="hint" id="identity-text"></p>
             <ul class="prints" id="identity-keys"></ul>
             <button type="button" id="trust-host" hidden>Trust this host</button>
+            <div class="feedback" id="identity-feedback" hidden role="status" aria-live="polite">
+              <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+              <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
+              <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
+              <div class="feedback-body">
+                <span class="feedback-title" id="identity-feedback-title"></span>
+                <span class="feedback-detail" id="identity-feedback-detail" hidden></span>
+              </div>
+            </div>
           </div>
           <div class="box" id="key-box">
-            <div class="box-head"><span class="box-title">Deploy key</span><button type="button" id="make-key">Create deploy key</button></div>
+            <div class="box-head">
+              <span class="box-title-wrap">
+                <span class="box-title">Deploy key</span>
+                <span class="badge" id="key-added-badge" hidden>
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 5"/></svg>
+                  <span>Added on host</span>
+                </span>
+              </span>
+              <button type="button" id="make-key" aria-busy="false">
+                <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                <span id="make-key-label">Create deploy key</span>
+              </button>
+            </div>
             <p class="hint" id="key-text"></p>
             <div id="key-install" hidden>
               <label class="field"><span>Add it on the host with your password, typed once and not saved</span>
-                <span class="row"><input type="password" id="install-password" class="grow" autocomplete="off" spellcheck="false" placeholder="Password for the host">
-                  <button type="button" id="install-key">Add key</button></span>
+                <span class="inline-row">
+                  <input type="password" id="install-password" autocomplete="off" spellcheck="false" placeholder="Password for the host">
+                  <button type="button" class="action" id="install-key" aria-busy="false">
+                    <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                    <span id="install-key-label">Add key</span>
+                  </button>
+                </span>
               </label>
+              <p class="hint" id="key-trust-note" hidden></p>
+            </div>
+            <div class="feedback" id="key-feedback" hidden role="status" aria-live="polite">
+              <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+              <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
+              <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
+              <div class="feedback-body">
+                <span class="feedback-title" id="key-feedback-title"></span>
+                <span class="feedback-detail" id="key-feedback-detail" hidden></span>
+              </div>
+            </div>
+            <div id="key-manual" hidden>
               <p class="hint">Or add it yourself: run this on the host as that user. <button type="button" class="link" id="copy-install">Copy the command</button></p>
               <pre id="install-command"></pre>
             </div>
@@ -139,11 +231,17 @@
           </label>
           <p class="hint">A command that reaches the host and runs what is given to it, such as ssh with a host from your SSH settings. It must work without typing anything.</p>
         </div>
+        <div id="folder-fields">
+          <label class="field"><span>App folder on the host</span>
+            <input type="text" id="folder" spellcheck="false" autocapitalize="off" placeholder="/srv/my-app">
+          </label>
+          <p class="hint" id="folder-hint"></p>
+        </div>
         <label class="field"><span>Commands</span>
-          <textarea id="commands" spellcheck="false" autocapitalize="off" placeholder="cd /srv/my-app&#10;git pull --ff-only&#10;npm ci&#10;npm run build"></textarea>
+          <textarea id="commands" spellcheck="false" autocapitalize="off" placeholder="git pull --ff-only&#10;npm ci&#10;npm run build&#10;sudo systemctl restart my-app"></textarea>
         </label>
-        <p class="hint">One per line, run in order. The deploy stops at the first command that fails. DEPLOY_SHA and DEPLOY_BRANCH hold the merged commit and its branch.
-          Dry run checks them on the host without running any.</p>
+        <p class="hint">One per line, run in order, starting in the app folder. The deploy stops at the first command that fails. DEPLOY_SHA and DEPLOY_BRANCH hold the merged commit and its branch.
+          Dry run checks the folder, git and these commands on the host without running any, and suggests build commands from what it finds there.</p>
         <p class="hint" id="local-note" hidden>On this computer, PowerShell runs these. In PowerShell 7.4 or later a program that fails stops the deploy;
           in Windows PowerShell 5 only a failed cmdlet does, so end with your own check there.</p>
         <fieldset>
@@ -180,6 +278,12 @@
       </div>
       <p id="status" role="status" aria-live="polite"></p>
       <pre id="dry-output" hidden tabindex="0" aria-label="What the dry run found"></pre>
+      <div class="box" id="suggest-box" hidden>
+        <span class="box-title">Suggested commands</span>
+        <p class="hint" id="suggest-text"></p>
+        <pre id="suggest-lines"></pre>
+        <button type="button" id="suggest-use">Add to the commands</button>
+      </div>
     </form>
     <section aria-labelledby="saved-title">
       <h2 id="saved-title">Apps that deploy from this computer</h2>
