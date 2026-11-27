@@ -1282,12 +1282,16 @@ function onComputerNotice(notice) {
       const combined = computerDeploy.formatDeployOutput({
         output: notice.output, stderr: notice.stderr, log: notice.log, message: notice.message, exitCode: notice.exitCode, status: notice.status,
       });
+      const hint = notice.status === 'done'
+        ? ''
+        : computerPolicy.visibleLine(computerDeploy.deployHint({ output: notice.output, stderr: notice.stderr, message: notice.message }));
       deployWindow.webContents.send('1904:deploy-run-result', {
         appId: notice.request.app.id,
         ok: notice.status === 'done',
         status: notice.status,
         exitCode: Number.isInteger(notice.exitCode) ? notice.exitCode : null,
         message: summary,
+        hint,
         output: computerPolicy.visibleText(combined.slice(-16000)),
       });
     }
@@ -1299,12 +1303,16 @@ function onComputerNotice(notice) {
       const combined = computerDeploy.formatDeployOutput({
         output: notice.output, stderr: notice.stderr, log: notice.log, message: notice.message, exitCode: notice.exitCode, status: notice.status,
       });
+      const hint = notice.status === 'done'
+        ? ''
+        : computerPolicy.visibleLine(computerDeploy.deployHint({ output: notice.output, stderr: notice.stderr, message: notice.message }));
       deployWindow.webContents.send('1904:deploy-dry-run-result', {
         appId: notice.request.app.id,
         ok: notice.status === 'done',
         status: notice.status,
         exitCode: Number.isInteger(notice.exitCode) ? notice.exitCode : null,
         message: computerPolicy.visibleLine(notice.message || ''),
+        hint,
         output: computerPolicy.visibleText(combined.slice(-16000)),
         // Build commands that usually go with what the folder holds, for the person to read and save themselves.
         suggested: checked ? computerDeploy.suggestCommands(notice.output, checked.commands) : undefined,
@@ -2242,6 +2250,14 @@ function installDeployHandlers() {
     if (!isDeploySender(event) || typeof appId !== 'string') return;
     const command = deploySsh.installKeyCommand(deploySecrets?.summary(appId, computerLink?.info()?.id).publicKey);
     if (command) clipboard.writeText(command);
+  });
+  ipcMain.on('1904:deploy-open-activity', (event) => {
+    if (!isDeploySender(event)) return;
+    showActivity({ focus: true });
+  });
+  ipcMain.on('1904:deploy-copy-output', (event, text) => {
+    if (!isDeploySender(event) || typeof text !== 'string' || !text) return;
+    clipboard.writeText(text.slice(0, 64 * 1024));
   });
   ipcMain.on('1904:secret-answer', (event, nonce, value) => {
     if (!isSecretSender(event) || !secretPending || nonce !== secretPending.nonce) return;

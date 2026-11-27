@@ -322,6 +322,49 @@ function suggestCommands(output, commands = '') {
 }
 
 /**
+ * If the first non-empty, non-comment line of `commands` is a plain `cd <full-path>` (matching the same
+ * safe path rule as `folder`), returns `{ folder, rest }` so Dry run can still check that git checkout
+ * and the deploy window can offer to move it into "App folder on the host".
+ */
+function leadingCdFolder(commands) {
+  const lines = String(commands ?? '').replace(/\r\n?/g, '\n').split('\n');
+  const index = lines.findIndex(line => {
+    const trimmed = line.trim();
+    return Boolean(trimmed) && !trimmed.startsWith('#');
+  });
+  if (index === -1) return undefined;
+  const match = /^cd\s+(?:(['"])([^\s'"]+)\1|([^\s'"&;|<>`$()]+))\s*$/.exec(lines[index].trim());
+  const raw = (match?.[2] ?? match?.[3] ?? '').trim().replace(/(.)\/+$/, '$1');
+  if (!raw || raw.length > DEPLOY_FOLDER_MAX || !LOG_PATH.test(raw) || raw.includes('..')) return undefined;
+  const rest = [...lines.slice(0, index), ...lines.slice(index + 1)].join('\n').replace(/^\n+/, '');
+  return { folder: raw, rest };
+}
+
+/**
+ * Actionable next step for common non-interactive deploy or dry-run failures, or '' when none applies.
+ * Uses only fixed sentences so nothing printed by a remote host becomes instructions or markup.
+ */
+function deployHint({ output = '', stderr = '', message = '' } = {}) {
+  const text = `${output}\n${stderr}\n${message}`;
+  if (/CANNOT PULL:|could not read Username|could not read Password|terminal prompts disabled|Authentication failed for|Permission denied \(publickey\)[\s\S]{0,160}Could not read from remote repository/i.test(text)) {
+    return 'Deploys run without a terminal, so git on the host cannot prompt for a username or password. Configure saved git credentials for this user on the host, or switch the repo remote to SSH with a read-only deploy key.';
+  }
+  if (/NO FOLDER:|The app folder is not on the host:/i.test(text)) {
+    return 'Check the path in “App folder on the host”, or clone the repository into that folder on the host first.';
+  }
+  if (/NOT A CHECKOUT:|not a git repository/i.test(text)) {
+    return 'The folder on the host is not a git checkout. Clone the app’s repository into it on the host first.';
+  }
+  if (/Cannot connect to the Docker daemon|permission denied while trying to connect to the Docker daemon/i.test(text)) {
+    return 'Docker could not be reached by this user on the host. Make sure Docker is running and this user has permission to run docker commands.';
+  }
+  if (/sudo: a terminal is required|sudo: a password is required|sudo asks for a password here/i.test(text)) {
+    return 'Deploys cannot type a sudo password. Allow only the needed restart command with NOPASSWD in sudoers on the host, or avoid sudo.';
+  }
+  return '';
+}
+
+/**
  * A dry run: what can be checked where the commands would run, without running any of them. That the
  * connection works and as whom; that the host has what the script itself needs and the programs the
  * commands start; that the commands parse (`sh -n` reads them and runs nothing); that sudo, when the
@@ -332,10 +375,20 @@ function suggestCommands(output, commands = '') {
 function preflightScript({ recipe, nonce }) {
   if (!NONCE.test(nonce)) throw new Error('A dry run needs a nonce.');
   const mode = recipe.log?.mode ?? 'output';
+  const inferred = !recipe.folder ? leadingCdFolder(recipe.commands) : undefined;
+  const folderRecipe = inferred ? { ...recipe, folder: inferred.folder } : recipe;
+  const usesGitPull = String(recipe.commands ?? '').split('\n').some(line => {
+    const trimmed = line.trim();
+    return Boolean(trimmed) && !trimmed.startsWith('#') && /(^|[\s;&|(])git\s+(?:pull|fetch)\b/.test(trimmed);
+  });
   const lines = [
     '__1904_bad=0',
     'echo "Connected as $(id -un 2>/dev/null || echo unknown) on $(hostname 2>/dev/null || echo this host)."',
-    ...folderChecks(recipe),
+    ...(inferred ? [`echo "Checking ${inferred.folder} from your leading cd command (TIP: set App folder on the host to ${inferred.folder} instead)."`] : []),
+    ...folderChecks(folderRecipe),
+    ...(!recipe.folder && !inferred && usesGitPull
+      ? ['echo "CHECK: App folder on the host is empty, so Dry run did not check git or whether git pull can sign in without a prompt. Set App folder on the host to verify it."']
+      : []),
     ...['sh', 'base64', ...commandTools(recipe.commands)].map(tool =>
       `if command -v ${tool} >/dev/null 2>&1; then echo "found: ${tool}"; else echo "MISSING: ${tool} is not installed for this user"; __1904_bad=1; fi`),
     `if echo ${Buffer.from(recipe.commands + '\n', 'utf8').toString('base64')} | base64 -d | sh -n; then echo "The commands parse."; else echo "The commands do not parse: see the error above."; __1904_bad=1; fi`,
@@ -679,6 +732,6 @@ function recipeView(recipe, pairedId) {
 module.exports = {
   DEPLOYS_PATH, RECIPES_FILE, DEPLOY_CONNECT_MAX, DEPLOY_COMMANDS_MAX, DEPLOY_COMMAND_LINES, DEPLOY_LOG_PATH_MAX, DEPLOY_FOLDER_MAX, DEPLOY_LOG_MODES,
   DEPLOY_LOG_TAIL_BYTES, DEPLOY_TIMEOUT_SECONDS, DEPLOY_WAIT_MAX_MS, DEPLOY_PROMPT_MS, POWERSHELL_STOP, validBranch, DEPLOY_POSITION, DEPLOY_RECIPES_MAX, DEPLOY_FINAL_STATUSES, NO_RECIPE, UNCONFIRMED_RUN,
-  cleanRecipe, recipeHash, recipeText, isRemote, deployScript, preflightScript, commandTools, scriptWord, deployPlan, deployEnvironment, readDeployOutput, formatDeployOutput, deployOutcome,
+  cleanRecipe, recipeHash, recipeText, isRemote, deployScript, preflightScript, leadingCdFolder, deployHint, commandTools, scriptWord, deployPlan, deployEnvironment, readDeployOutput, formatDeployOutput, deployOutcome,
   validateDeploy, deployRequest, deployUpdate, recipeRegistration, noApprovalPrompt, createDeployRecipes, recipeView, recipeReadiness, suggestCommands,
 };

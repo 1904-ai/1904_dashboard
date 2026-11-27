@@ -12,6 +12,8 @@ let state = { connection: { connected: false, text: '' }, apps: [], recipes: [],
 let selected;
 let busy = false;
 let activeAction = '';
+/** A Dry run or Run now currently executing asynchronously on this computer for one app. */
+let runningJob;
 /** The host identity the person trusted for the host in the form, and what the last check showed. */
 let trusted = [];
 let seen = [];
@@ -19,9 +21,13 @@ let seen = [];
 let suggested;
 /** A new setup starts with the one command every one of them needs. */
 const FIRST_COMMAND = 'git pull --ff-only';
+/** Matches computer-deploy.cjs LOG_PATH / DEPLOY_FOLDER_MAX for safe leading-cd detection. */
+const SAFE_FOLDER = /^(?:~\/|\/)[A-Za-z0-9._/@%+=:,-]+$/;
+const DEPLOY_FOLDER_MAX = 200;
 /** The last deploy key added on a host in this window session: `{ appId, publicKey, target }`. */
 let installedKey;
 let copyTimer;
+let copyOutputTimer;
 
 const AUTH_HINT = {
   key: '1904 Desktop makes a key for this app and keeps it encrypted on this computer. You add it on the host once; after that no password is needed.',
@@ -55,10 +61,32 @@ function hostTarget(host) {
   return host.port && host.port !== 22 ? `${who}:${host.port}` : who;
 }
 
-function setFeedback(id, { kind = '', title = '', detail = '' } = {}) {
+function sameKeySet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length === 0 || left.length !== right.length) return false;
+  const a = [...new Set(left.map(item => item.line))].sort();
+  const b = [...new Set(right.map(item => item.line))].sort();
+  return a.length === b.length && a.every((line, index) => line === b[index]);
+}
+
+function leadingCd(commands) {
+  const lines = String(commands ?? '').replace(/\r\n?/g, '\n').split('\n');
+  const index = lines.findIndex(line => {
+    const trimmed = line.trim();
+    return Boolean(trimmed) && !trimmed.startsWith('#');
+  });
+  if (index === -1) return undefined;
+  const match = /^cd\s+(?:(['"])([^\s'"]+)\1|([^\s'"&;|<>`$()]+))\s*$/.exec(lines[index].trim());
+  const raw = (match?.[2] ?? match?.[3] ?? '').trim().replace(/(.)\/+$/, '$1');
+  if (!raw || raw.length > DEPLOY_FOLDER_MAX || !SAFE_FOLDER.test(raw) || raw.includes('..')) return undefined;
+  const rest = [...lines.slice(0, index), ...lines.slice(index + 1)].join('\n').replace(/^\n+/, '');
+  return rest.trim() ? { folder: raw, rest } : undefined;
+}
+
+function setFeedback(id, { kind = '', title = '', detail = '', hint = '' } = {}) {
   const box = $(id);
   const titleEl = $(`${id}-title`);
   const detailEl = $(`${id}-detail`);
+  const hintEl = id === 'run-feedback' ? $('run-feedback-hint') : null;
   if (!title) {
     box.hidden = true;
     box.dataset.kind = '';
@@ -66,6 +94,10 @@ function setFeedback(id, { kind = '', title = '', detail = '' } = {}) {
     titleEl.textContent = '';
     detailEl.textContent = '';
     detailEl.hidden = true;
+    if (hintEl) {
+      hintEl.textContent = '';
+      hintEl.hidden = true;
+    }
     return;
   }
   box.hidden = false;
@@ -74,6 +106,10 @@ function setFeedback(id, { kind = '', title = '', detail = '' } = {}) {
   titleEl.textContent = title;
   detailEl.textContent = detail || '';
   detailEl.hidden = !detail;
+  if (hintEl) {
+    hintEl.textContent = hint || '';
+    hintEl.hidden = !hint;
+  }
 }
 
 function resetCopyNotice() {
@@ -86,11 +122,38 @@ function resetCopyNotice() {
   delete button.dataset.copied;
 }
 
+function resetCopyOutputNotice() {
+  if (copyOutputTimer) {
+    clearTimeout(copyOutputTimer);
+    copyOutputTimer = undefined;
+  }
+  const button = $('copy-output');
+  button.textContent = 'Copy output';
+  delete button.dataset.copied;
+}
+
+function hideOutput() {
+  $('output-wrap').hidden = true;
+  $('dry-output').hidden = true;
+  $('dry-output').textContent = '';
+  resetCopyOutputNotice();
+}
+
+function showOutput({ title, ariaLabel, text }) {
+  $('output-title').textContent = title;
+  $('dry-output').setAttribute('aria-label', ariaLabel);
+  $('dry-output').textContent = text;
+  $('dry-output').hidden = false;
+  $('output-wrap').hidden = false;
+  resetCopyOutputNotice();
+}
+
 function clearBoxFeedback() {
   setFeedback('identity-feedback');
   setFeedback('key-feedback');
   setFeedback('run-feedback');
   resetCopyNotice();
+  resetCopyOutputNotice();
 }
 
 /** The host as typed. The port is empty when it is left to the default (or, with the person's own SSH setup, to their settings). */
@@ -110,6 +173,16 @@ function formInput() {
   };
 }
 
+function updateCdTip() {
+  const show = where() !== 'local' && !$('folder').value.trim();
+  const cd = show ? leadingCd($('commands').value) : undefined;
+  $('folder-cd-tip').hidden = !cd;
+  if (cd) {
+    $('folder-cd-text').textContent = `Commands start with “cd ${cd.folder}”. Move it into App folder on the host so Dry run checks git there and deploys fail fast if the folder is missing.`;
+    $('use-cd-folder').textContent = `Use ${cd.folder}`;
+  }
+}
+
 /** Shows the parts of the form that go with where the commands run and how to sign in. */
 function showParts() {
   const place = where();
@@ -121,6 +194,7 @@ function showParts() {
   const repo = recipeFor(selected)?.repo || state.apps.find(app => app.id === selected)?.repo;
   $('folder-hint').textContent = `Where this app’s code is on the host: a git checkout of ${repo ? `its repository (${repo})` : 'its repository'}. The commands start there. `
     + 'Dry run checks that the folder is that checkout and that the host can pull without typing a password.';
+  updateCdTip();
   $('auth-hint').textContent = AUTH_HINT[auth] || '';
   $('identity-box').hidden = auth === 'ssh';
   $('key-box').hidden = auth !== 'key';
@@ -193,7 +267,7 @@ function fill(appId) {
   $('no-approval').checked = Boolean(recipe?.noApproval);
   $('position').value = String(recipe?.position ?? 10);
   $('stop-on-failure').checked = Boolean(recipe?.stopOnFailure);
-  $('dry-output').hidden = true;
+  hideOutput();
   clearBoxFeedback();
   showParts();
   enable();
@@ -225,16 +299,24 @@ function edited() {
 
 function enable() {
   const usable = state.connection.connected && Boolean(selected) && !busy;
+  const jobHere = runningJob?.appId === selected ? runningJob.kind : '';
+  const dryBusy = activeAction === 'dry-run' || jobHere === 'dry-run';
+  const runBusy = activeAction === 'run' || jobHere === 'run';
+  const anyRunBusy = dryBusy || runBusy;
   $('fields').disabled = !state.connection.connected || busy;
   $('save').disabled = !usable;
   const recipe = recipeFor(selected);
   // Run now and Dry run use what is saved, so they are offered only while the form shows exactly that.
   const changed = Boolean(recipe) && edited();
   for (const id of ['run', 'dry-run']) {
-    $(id).disabled = !usable || !recipe || recipe.stale || changed;
-    $(id).title = changed ? 'Save your changes first: this uses the saved setup.' : '';
+    $(id).disabled = !usable || !recipe || recipe.stale || changed || anyRunBusy;
+    $(id).title = anyRunBusy ? 'Wait for the current check or deploy to finish.'
+      : changed ? 'Save your changes first: this uses the saved setup.' : '';
   }
-  $('remove').disabled = !usable || !recipe;
+  $('dry-run').setAttribute('aria-busy', String(dryBusy));
+  $('run').setAttribute('aria-busy', String(runBusy));
+  $('remove').disabled = !usable || !recipe || anyRunBusy;
+  updateCdTip();
   renderSteps();
   const host = typedHost();
   const canInstallTarget = trusted.length > 0 && Boolean(host.user);
@@ -247,8 +329,8 @@ function enable() {
   $('install-key').setAttribute('aria-busy', String(activeAction === 'install-key'));
   $('install-key-label').textContent = activeAction === 'install-key' ? 'Adding key…' : 'Add key';
   $('save').textContent = activeAction === 'save' ? 'Saving…' : 'Save';
-  $('dry-run').textContent = activeAction === 'dry-run' ? 'Checking…' : 'Dry run';
-  $('run').textContent = activeAction === 'run' ? 'Starting…' : 'Run now';
+  $('dry-run-label').textContent = dryBusy ? 'Checking…' : 'Dry run';
+  $('run-label').textContent = runBusy ? (activeAction === 'run' ? 'Starting…' : 'Deploying…') : 'Run now';
   $('remove').textContent = activeAction === 'remove' ? 'Removing…' : 'Remove';
 }
 
@@ -271,7 +353,7 @@ function setupSteps(recipe, changed) {
   const steps = [{
     state: changed ? 'todo' : 'ok', name: changed ? 'Save your changes' : 'Saved on this computer',
     text: changed ? 'The checks below are for the setup as it was last saved.'
-      : remote && !recipe.folder ? 'No app folder is set, so the commands start in the host user’s home folder and Dry run cannot check git there.' : '',
+      : remote && !recipe.folder ? 'No app folder is set, so commands start in the host user’s home folder. Set App folder on the host so Dry run checks git there.' : '',
   }];
   const check = recipe.ready?.checked ?? 'todo';
   steps.push(!remote && state.platform === 'windows'
@@ -360,6 +442,9 @@ function render() {
     edit.type = 'button';
     edit.addEventListener('click', () => { $('app').value = recipe.appId; fill(recipe.appId); $('commands').focus(); });
     item.append(node('span', 'saved-name', recipe.appName), node('span', 'saved-detail', lastRunLine(recipe)), node('span', 'saved-last', lastRunResult(recipe)), edit);
+    if (recipe.lastRun?.status && recipe.lastRun.status !== 'done' && recipe.lastRun.message) {
+      item.append(node('span', 'saved-error', recipe.lastRun.message));
+    }
     return item;
   }));
   enable();
@@ -458,9 +543,33 @@ window.addEventListener('DOMContentLoaded', () => {
       void installKey();
     }
   });
+  for (const id of ['open-activity', 'open-activity-header']) {
+    $(id).addEventListener('click', () => { ipcRenderer.send('1904:deploy-open-activity'); });
+  }
+  $('copy-output').addEventListener('click', () => {
+    const text = $('dry-output').textContent || '';
+    if (!text) return;
+    ipcRenderer.send('1904:deploy-copy-output', text);
+    resetCopyOutputNotice();
+    const button = $('copy-output');
+    button.textContent = 'Copied';
+    button.dataset.copied = 'true';
+    copyOutputTimer = setTimeout(resetCopyOutputNotice, 2500);
+  });
+  $('use-cd-folder').addEventListener('click', () => {
+    const cd = leadingCd($('commands').value);
+    if (!cd) return;
+    $('folder').value = cd.folder;
+    $('commands').value = cd.rest;
+    showParts();
+    enable();
+    $('folder').focus();
+    say(`Moved ${cd.folder} into App folder on the host. Review and Save.`);
+  });
 
   $('check-host').addEventListener('click', async () => {
     const host = typedHost();
+    const previouslyTrusted = [...trusted];
     say('');
     setFeedback('identity-feedback', {
       kind: 'pending',
@@ -477,11 +586,35 @@ window.addEventListener('DOMContentLoaded', () => {
       });
       return;
     }
+    if (previouslyTrusted.length && sameKeySet(previouslyTrusted, answer.keys)) {
+      trusted = previouslyTrusted;
+      seen = [];
+      showParts();
+      enable();
+      setFeedback('identity-feedback', {
+        kind: 'ok',
+        title: 'Host identity matches',
+        detail: 'The host showed the exact identity you already trusted.',
+      });
+      return;
+    }
     trusted = [];
     seen = answer.keys;
-    setFeedback('identity-feedback');
     showParts();
     enable();
+    if (previouslyTrusted.length) {
+      setFeedback('identity-feedback', {
+        kind: 'error',
+        title: 'Host identity changed',
+        detail: 'The host showed a different key than the one you trusted. Compare the fingerprint above carefully before trusting it.',
+      });
+    } else {
+      setFeedback('identity-feedback', {
+        kind: 'ok',
+        title: 'Host reached',
+        detail: 'Compare the fingerprint above, then choose Trust this host.',
+      });
+    }
   });
   $('trust-host').addEventListener('click', () => {
     trusted = seen;
@@ -491,7 +624,7 @@ window.addEventListener('DOMContentLoaded', () => {
     setFeedback('identity-feedback', {
       kind: 'ok',
       title: 'Host identity trusted',
-      detail: 'Save below to keep it.',
+      detail: 'Save to keep it.',
     });
   });
   $('make-key').addEventListener('click', async () => {
@@ -549,19 +682,22 @@ window.addEventListener('DOMContentLoaded', () => {
     say('Added. Read them, then Save.');
   });
   $('dry-run').addEventListener('click', async () => {
-    $('dry-output').hidden = true;
-    $('dry-output').textContent = '';
+    hideOutput();
     suggested = undefined;
     showSuggestion();
     say('');
+    const targetApp = selected;
+    runningJob = { appId: targetApp, kind: 'dry-run' };
     setFeedback('run-feedback', {
       kind: 'pending',
       title: 'Running dry run…',
       detail: 'Checking the connection, folder, git, and commands on the host without running your commands.',
     });
-    const answer = await act('dry-run', '1904:deploy-dry-run', selected);
+    const answer = await act('dry-run', '1904:deploy-dry-run', targetApp);
     if (!answer) return;
     if (!answer.ok) {
+      if (runningJob?.appId === targetApp && runningJob.kind === 'dry-run') runningJob = undefined;
+      enable();
       setFeedback('run-feedback', {
         kind: 'error',
         title: 'Dry run could not start',
@@ -573,19 +709,22 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   });
   $('run').addEventListener('click', async () => {
-    $('dry-output').hidden = true;
-    $('dry-output').textContent = '';
+    hideOutput();
     suggested = undefined;
     showSuggestion();
     say('');
+    const targetApp = selected;
+    runningJob = { appId: targetApp, kind: 'run' };
     setFeedback('run-feedback', {
       kind: 'pending',
       title: 'Running deploy…',
       detail: 'Output and any error messages will appear here when it finishes. Computer Activity also shows live output.',
     });
-    const answer = await act('run', '1904:deploy-run', selected);
+    const answer = await act('run', '1904:deploy-run', targetApp);
     if (!answer) return;
     if (!answer.ok) {
+      if (runningJob?.appId === targetApp && runningJob.kind === 'run') runningJob = undefined;
+      enable();
       setFeedback('run-feedback', {
         kind: 'error',
         title: 'Deploy could not start',
@@ -601,6 +740,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (!answer) return;
     if (answer.ok) {
       if (installedKey?.appId === selected) installedKey = undefined;
+      if (runningJob?.appId === selected) runningJob = undefined;
       fill(selected);
       say('Removed from this computer.', 'ok');
     } else if (!answer.cancelled) say(answer.error || 'Could not remove.', 'error');
@@ -625,11 +765,11 @@ ipcRenderer.on('1904:deploy-select', (_event, appId) => {
   fill(appId);
 });
 ipcRenderer.on('1904:deploy-dry-run-result', (_event, result) => {
-  if (!result || result.appId !== selected) return;
+  if (!result) return;
+  if (runningJob?.appId === result.appId && runningJob.kind === 'dry-run') runningJob = undefined;
+  if (result.appId !== selected) { enable(); return; }
   const output = result.output || result.message || 'The host returned no output.';
-  $('dry-output').setAttribute('aria-label', 'What the dry run found');
-  $('dry-output').textContent = output;
-  $('dry-output').hidden = false;
+  showOutput({ title: 'Dry run output', ariaLabel: 'What the dry run found', text: output });
   // Only fixed lines the main process chose from what the folder holds: text, never markup, and never added without a click.
   suggested = result.suggested && Array.isArray(result.suggested.lines) ? result.suggested : undefined;
   showSuggestion();
@@ -639,15 +779,21 @@ ipcRenderer.on('1904:deploy-dry-run-result', (_event, result) => {
       kind: 'error',
       title: Number.isInteger(result.exitCode) && result.exitCode !== 0 ? `Dry run failed (exit code ${result.exitCode})` : 'Dry run failed',
       detail: result.message || 'See the captured output and errors below.',
+      hint: result.hint || '',
     });
   say(result.ok ? 'Dry run: nothing found that would stop a deploy.' : (result.message || 'Dry run: something would stop a deploy. See below.'), result.ok ? 'ok' : 'error');
+  enable();
 });
 ipcRenderer.on('1904:deploy-run-result', (_event, result) => {
-  if (!result || result.appId !== selected) return;
+  if (!result) return;
+  if (runningJob?.appId === result.appId && runningJob.kind === 'run') runningJob = undefined;
+  if (result.appId !== selected) { enable(); return; }
   const output = result.output || result.message || '';
-  $('dry-output').setAttribute('aria-label', 'Deploy output and errors');
-  $('dry-output').textContent = output || (result.ok ? 'The commands finished with no output.' : 'No error output was returned.');
-  $('dry-output').hidden = false;
+  showOutput({
+    title: 'Deploy output',
+    ariaLabel: 'Deploy output and errors',
+    text: output || (result.ok ? 'The commands finished with no output.' : 'No error output was returned.'),
+  });
   const statusLabel = { done: 'Deploy finished', failed: 'Deploy failed', timeout: 'Deploy timed out', cancelled: 'Deploy stopped', declined: 'Deploy declined' }[result.status] || (result.ok ? 'Deploy finished' : 'Deploy did not finish');
   const codeSuffix = !result.ok && Number.isInteger(result.exitCode) && result.exitCode !== 0 ? ` (exit code ${result.exitCode})` : '';
   setFeedback('run-feedback', result.ok
@@ -656,8 +802,10 @@ ipcRenderer.on('1904:deploy-run-result', (_event, result) => {
       kind: 'error',
       title: `${statusLabel}${codeSuffix}`,
       detail: result.message || 'See the captured output and error messages below.',
+      hint: result.hint || '',
     });
   say(result.ok ? 'Deploy finished.' : (result.message || `${statusLabel}${codeSuffix}. See output below.`), result.ok ? 'ok' : 'error');
+  enable();
 });
 ipcRenderer.on('1904:deploy-theme', (_event, theme) => {
   document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';

@@ -372,3 +372,88 @@ test('Deploy window pre-selects a requested app from initial state or 1904:deplo
   assert.equal(ui.$('app').value, 'app_openls');
   assert.equal(ui.$('host-name').value, 'openls.internal');
 });
+
+test('Check again preserves trust when the host key matches, and alerts when the host key changed', async () => {
+  let returnedKeys = [{ line: HOST_KEY, fingerprint: 'ED25519 SHA256:Lh5htTA+sIPvycGXk9UZ' }];
+  const ui = loadDeployWindow({
+    state: baseState({ trusted: true }),
+    async onInvoke(channel) {
+      if (channel === '1904:deploy-check-host') return { ok: true, keys: returnedKeys };
+      return { ok: true };
+    },
+  });
+  await ui.flush();
+
+  assert.equal(ui.$('dry-run').disabled, false);
+  ui.$('check-host').click();
+  await ui.flush();
+  assert.equal(ui.$('trust-host').hidden, true, 'matching host key stays trusted');
+  assert.equal(ui.$('dry-run').disabled, false, 'Dry run stays enabled when host key matches');
+  assert.equal(ui.$('identity-feedback').dataset.kind, 'ok');
+  assert.equal(ui.$('identity-feedback-title').textContent, 'Host identity matches');
+
+  returnedKeys = [{ line: 'openls.internal ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ' + 'y'.repeat(42), fingerprint: 'ED25519 SHA256:ChangedKey' }];
+  ui.$('check-host').click();
+  await ui.flush();
+  assert.equal(ui.$('trust-host').hidden, false, 'changed host key requires re-trust');
+  assert.equal(ui.$('dry-run').disabled, true, 'Dry run disabled until changed key is trusted and saved');
+  assert.equal(ui.$('identity-feedback').dataset.kind, 'error');
+  assert.equal(ui.$('identity-feedback-title').textContent, 'Host identity changed');
+});
+
+test('Leading cd tip moves the path into App folder on the host in one click', async () => {
+  const st = baseState({ trusted: true });
+  st.recipes[0].commands = 'cd /opt/openls\ngit pull\ndocker compose up -d';
+  const ui = loadDeployWindow({ state: st, async onInvoke() { return { ok: true }; } });
+  await ui.flush();
+
+  assert.equal(ui.$('folder-cd-tip').hidden, false);
+  assert.match(ui.$('folder-cd-text').textContent, /cd \/opt\/openls/);
+  assert.equal(ui.$('use-cd-folder').textContent, 'Use /opt/openls');
+
+  ui.$('use-cd-folder').click();
+  assert.equal(ui.$('folder').value, '/opt/openls');
+  assert.equal(ui.$('commands').value, 'git pull\ndocker compose up -d');
+  assert.equal(ui.$('folder-cd-tip').hidden, true);
+  assert.match(ui.$('status').textContent, /Moved \/opt\/openls/);
+});
+
+test('Dry run and Run now stay busy until result arrives, show actionable hint, and wire Copy output and Computer Activity', async () => {
+  const ui = loadDeployWindow({ state: baseState({ trusted: true }), async onInvoke() { return { ok: true }; } });
+  await ui.flush();
+
+  ui.$('dry-run').click();
+  await ui.flush();
+  assert.equal(ui.$('dry-run').disabled, true, 'stays disabled while dry run executes on host');
+  assert.equal(ui.$('run').disabled, true, 'Run now also disabled while dry run executes');
+  assert.equal(ui.$('dry-run').getAttribute('aria-busy'), 'true');
+  assert.equal(ui.$('dry-run-label').textContent, 'Checking…');
+
+  ui.emit('1904:deploy-dry-run-result', {
+    appId: 'app_openls',
+    ok: false,
+    status: 'failed',
+    exitCode: 1,
+    message: 'The commands ended with exit code 1: CANNOT PULL',
+    hint: 'Deploys run without a terminal, so git on the host cannot prompt for a username or password.',
+    output: 'CANNOT PULL: the host could not read origin without a password',
+  });
+  assert.equal(ui.$('dry-run').disabled, false, 're-enabled once result arrives');
+  assert.equal(ui.$('dry-run').getAttribute('aria-busy'), 'false');
+  assert.equal(ui.$('dry-run-label').textContent, 'Dry run');
+  assert.equal(ui.$('run-feedback-hint').hidden, false);
+  assert.match(ui.$('run-feedback-hint').textContent, /without a terminal/);
+  assert.equal(ui.$('output-wrap').hidden, false);
+
+  ui.$('copy-output').click();
+  assert.equal(ui.sent.at(-1).channel, '1904:deploy-copy-output');
+  assert.match(ui.sent.at(-1).args[0], /CANNOT PULL/);
+  assert.equal(ui.$('copy-output').textContent, 'Copied');
+  ui.runTimers();
+  assert.equal(ui.$('copy-output').textContent, 'Copy output');
+
+  ui.$('open-activity').click();
+  assert.equal(ui.sent.at(-1).channel, '1904:deploy-open-activity');
+  ui.$('open-activity-header').click();
+  assert.equal(ui.sent.at(-1).channel, '1904:deploy-open-activity');
+});

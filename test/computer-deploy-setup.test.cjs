@@ -212,3 +212,42 @@ test('the window shows the folder, the checklist and suggestions as text, and a 
   assert.match(bridge, /if \(request\.dryRun\) deploys\.noteCheck\?\.\(request\.app\.id, \{ ok: result\.status === 'done' \}\);\s+else deploys\.noteRun\(/);
   assert.match(main, /suggested: checked \? computerDeploy\.suggestCommands\(notice\.output, checked\.commands\) : undefined/);
 });
+
+test('leadingCdFolder detects a safe leading cd line and preflightScript still checks git pull there', { skip: !hasGit }, t => {
+  assert.deepEqual(deploy.leadingCdFolder('cd /opt/openls\ngit pull\ndocker compose up -d'), { folder: '/opt/openls', rest: 'git pull\ndocker compose up -d' });
+  assert.deepEqual(deploy.leadingCdFolder('# comment\ncd "~/apps/openls/"\ngit pull'), { folder: '~/apps/openls', rest: '# comment\ngit pull' });
+  for (const bad of ['cd relative/path\ngit pull', 'cd /opt/my app\ngit pull', 'cd /opt/$(id)\ngit pull', 'cd /opt/openls && git pull', 'git pull']) {
+    assert.equal(deploy.leadingCdFolder(bad), undefined, bad);
+  }
+
+  const dir = dataFolder(t);
+  const home = join(dir, 'home');
+  mkdirSync(home);
+  const env = { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' };
+  const git = (cwd, ...args) => { const ran = spawnSync('git', args, { cwd, env, encoding: 'utf8' }); assert.equal(ran.status, 0, `git ${args.join(' ')}: ${ran.stderr}`); };
+  const app = join(dir, 'openls');
+  mkdirSync(app);
+  git(app, 'init', '-q');
+  git(app, 'remote', 'add', 'origin', 'http://deploy:secret@127.0.0.1:9/adam/openls.git'); // gitleaks:allow
+  // App folder is intentionally blank while commands start with `cd <app>`: dry run must still check git pull auth and fail!
+  const recipe = { ...deploy.cleanRecipe({ ...REMOTE, commands: `cd ${app}\ngit pull` }).recipe, repo: 'openls' };
+  const ran = spawnSync('/bin/sh', ['-s'], { input: deploy.preflightScript({ recipe, nonce: NONCE }), encoding: 'utf8', cwd: dir, env });
+  const outcome = deploy.deployOutcome({ outcome: { status: 'done', exitCode: ran.status, stdout: ran.stdout }, marker: true, nonce: NONCE });
+  assert.equal(outcome.status, 'failed');
+  assert.match(outcome.output, /Checking .*openls from your leading cd command/);
+  assert.match(outcome.output, /CANNOT PULL: the host could not read origin without a password or passphrase\./);
+  assert.doesNotMatch(outcome.output, /secret/);
+
+  // Without a leading cd or folder, a git pull command warns that git was not checked.
+  const noFolderScript = deploy.preflightScript({ recipe: deploy.cleanRecipe({ ...REMOTE, commands: 'git pull' }).recipe, nonce: NONCE });
+  assert.match(noFolderScript, /CHECK: App folder on the host is empty, so Dry run did not check git/);
+});
+
+test('deployHint returns actionable guidance for common non-interactive deploy failures', () => {
+  assert.match(deploy.deployHint({ stderr: "fatal: could not read Username for 'http://192.168.2.100:3000': No such device or address" }), /saved git credentials|deploy key/i);
+  assert.match(deploy.deployHint({ output: 'CANNOT PULL: the host could not read origin without a password' }), /without a terminal/i);
+  assert.match(deploy.deployHint({ stderr: 'The app folder is not on the host: /opt/openls' }), /App folder on the host/i);
+  assert.match(deploy.deployHint({ stderr: 'permission denied while trying to connect to the Docker daemon socket' }), /Docker/i);
+  assert.match(deploy.deployHint({ stderr: 'sudo: a terminal is required to read the password' }), /NOPASSWD/i);
+  assert.equal(deploy.deployHint({ output: 'Already up to date.', stderr: '' }), '');
+});

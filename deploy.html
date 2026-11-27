@@ -15,37 +15,48 @@
       --focus: #0b62d6; --info-bg: #0b62d610; --info-edge: #0b62d645; }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--canvas); color: var(--text); font: 400 13px/1.45 system-ui, sans-serif; }
-    header { position: sticky; top: 0; z-index: 1; padding: 14px 28px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
-    .header-inner { max-width: 1200px; margin: 0 auto; }
+    header { position: sticky; top: 0; z-index: 2; padding: 14px 28px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
+    .header-inner { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
     h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
     #connection { margin: 4px 0 0; color: var(--muted); }
-    main { width: 100%; padding: 8px 28px 32px; max-width: 1200px; margin: 0 auto; }
-    h2 { margin: 18px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+    main { width: 100%; padding: 14px 28px 36px; max-width: 1200px; margin: 0 auto; }
+    h2 { margin: 22px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+    .intro { margin: 0 0 14px; max-width: 78ch; color: var(--muted); font-size: 12.5px; }
     .hint { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
     [hidden] { display: none !important; }
+    .workspace { display: grid; gap: 20px; align-items: start; }
+    .workspace-main { min-width: 0; }
+    .workspace-rail { min-width: 0; display: grid; gap: 12px; align-content: start; }
+    @media (min-width: 920px) {
+      .workspace { grid-template-columns: minmax(0, 1.32fr) minmax(320px, 0.98fr); gap: 24px; }
+      .workspace-rail { position: sticky; top: 78px; }
+    }
     .field { display: block; margin: 12px 0 0; }
+    .workspace-main > .field:first-child { margin-top: 0; }
     .field > span:first-child, legend { display: block; margin: 0 0 5px; padding: 0; font-weight: 600; }
     input[type="text"], input[type="password"], input[type="number"], textarea, select { width: 100%; color: inherit; background: var(--panel); border: 1px solid var(--edge);
       border-radius: 6px; padding: 7px 9px; font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .box input[type="password"], .box input[type="text"] { background: var(--field); }
     select { font: inherit; }
     input[type="number"] { width: 76px; }
-    textarea { min-height: 170px; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4; }
+    textarea { min-height: 156px; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4; }
     fieldset { margin: 14px 0 0; padding: 0; border: 0; min-width: 0; }
+    #fields { margin-top: 0; }
     .choice { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; align-items: start; margin: 6px 0 0; }
     .choice input { margin: 3px 0 0; }
     .choice .hint { grid-column: 2; margin: 0; }
     .choice:has(> input:disabled) { opacity: .6; }
     .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
-    .row .field { flex: 1 1 240px; }
-    .row .grow { flex: 2 1 360px; min-width: 0; }
+    .row .field { flex: 1 1 200px; }
+    .row .grow { flex: 2 1 280px; min-width: 0; }
     .row button { flex: none; }
-    .row .narrow { flex: 0 0 104px; }
+    .row .narrow { flex: 0 0 96px; }
     .row .narrow input { width: 100%; }
     .inline-row { display: flex; gap: 8px; align-items: stretch; }
     .inline-row input { flex: 1 1 auto; min-width: 0; }
     .inline-row button { flex: none; }
     .box { margin: 12px 0 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .workspace-rail .box { margin-top: 0; }
     .box .field:first-child { margin-top: 0; }
     .box-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
     .box-title-wrap { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
@@ -55,8 +66,12 @@
     .badge svg { width: 12px; height: 12px; flex: none; }
     .prints { margin: 6px 0 0; gap: 4px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
     #trust-host { margin-top: 8px; }
+    .cd-tip { margin: 8px 0 0; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--wait-edge); background: var(--wait-bg);
+      display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 12px; }
+    .cd-tip span { flex: 1 1 200px; }
     .feedback { margin: 10px 0 0; padding: 9px 12px; border-radius: 7px; border: 1px solid var(--line); display: flex; align-items: flex-start; gap: 9px;
       font-size: 12.5px; line-height: 1.45; }
+    .workspace-rail .feedback { margin-top: 0; }
     .feedback .fb-icon { width: 16px; height: 16px; flex: none; margin-top: 1px; display: none; }
     .feedback[data-kind="pending"] { background: var(--info-bg); border-color: var(--info-edge); }
     .feedback[data-kind="pending"] .fb-pending { display: block; color: var(--focus); }
@@ -66,41 +81,52 @@
     .feedback[data-kind="error"] { background: var(--bad-bg); border-color: var(--bad-edge); }
     .feedback[data-kind="error"] .fb-error { display: block; color: var(--bad); }
     .feedback[data-kind="error"] .feedback-title { color: var(--bad); }
-    .feedback-body { min-width: 0; }
+    .feedback-body { min-width: 0; flex: 1; }
     .feedback-title { font-weight: 600; display: block; overflow-wrap: anywhere; }
-    .feedback-detail { display: block; margin-top: 2px; color: var(--text); opacity: .86; overflow-wrap: anywhere; }
+    .feedback-detail { display: block; margin-top: 2px; color: var(--text); opacity: .88; overflow-wrap: anywhere; }
+    .feedback-hint { display: block; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
     .btn-spin { width: 13px; height: 13px; flex: none; display: none; }
     button[aria-busy="true"] .btn-spin { display: inline-block; }
     @media (prefers-reduced-motion: no-preference) {
       .icon-spin { animation: spin .9s linear infinite; }
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    pre { margin: 8px 0 0; padding: 10px 12px; border-radius: 6px; background: var(--code); border: 1px solid var(--line);
+    .output-wrap { display: grid; gap: 6px; }
+    .output-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .output-title { font-size: 11.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+    .output-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    pre { margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--code); border: 1px solid var(--line);
       font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
-    .steps { list-style: none; margin: 12px 0 0; padding: 4px 12px; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
-    .steps li { display: grid; grid-template-columns: 18px 1fr; gap: 0 8px; align-items: baseline; padding: 6px 0; }
+    #key-manual pre, #suggest-box pre { margin-top: 8px; }
+    .steps { list-style: none; margin: 0; padding: 4px 12px; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .steps li { display: grid; grid-template-columns: 18px 1fr; gap: 0 8px; align-items: baseline; padding: 7px 0; }
     .steps li + li { border-top: 1px solid var(--line); }
     .steps .mark { font-weight: 700; text-align: center; color: var(--muted); }
     .steps li[data-state="ok"] .mark { color: var(--run); }
     .steps li[data-state="problem"] .mark { color: var(--bad); }
     .steps .step-name { font-weight: 600; }
-    .steps .step-text { grid-column: 2; color: var(--muted); font-size: 12px; }
+    .steps .step-text { grid-column: 2; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     #suggest-use { margin-top: 8px; }
     button.link { border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; color: var(--text); font: inherit; background: transparent; min-width: 0; }
     button.link[data-copied="true"] { color: var(--run); text-decoration: none; font-weight: 600; }
     .order { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; flex-wrap: wrap; }
-    .actions { display: flex; align-items: center; gap: 8px; margin: 18px 0 0; flex-wrap: wrap; }
+    .actions-box { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: grid; gap: 8px; }
+    .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .actions .spacer { flex: 1; }
-    #status { margin: 10px 0 0; min-height: 1.45em; }
+    #status { margin: 0; min-height: 1.25em; font-size: 12px; color: var(--muted); }
+    #status:empty { display: none; }
     #status[data-kind="error"] { color: var(--bad); }
     #status[data-kind="ok"] { color: var(--run); }
-    .warn { margin: 10px 0 0; padding: 8px 12px; border: 1px solid var(--wait); border-radius: 8px; background: var(--panel); }
+    .warn { margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--wait); border-radius: 8px; background: var(--panel); }
+    .saved-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
     ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-    .saved { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 8px 12px; }
+    .saved { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 9px 12px; }
     .saved-name { font-weight: 600; }
-    .saved-detail { flex: 1 1 240px; color: var(--muted); }
+    .saved-detail { flex: 1 1 220px; color: var(--muted); }
+    .saved-last { font-size: 12px; }
     .saved[data-last="failed"] .saved-last, .saved[data-last="timeout"] .saved-last { color: var(--bad); }
     .saved[data-last="done"] .saved-last { color: var(--run); }
+    .saved-error { flex: 1 0 100%; font-size: 12px; color: var(--bad); overflow-wrap: anywhere; }
     button { font: 550 12.5px system-ui, sans-serif; color: inherit; background: transparent; border: 1px solid var(--edge); border-radius: 6px; padding: 6px 13px; cursor: pointer;
       display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
     button.action { background: var(--raised); font-weight: 600; min-width: 108px; }
@@ -111,194 +137,225 @@
     button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
     button:disabled, input:disabled, textarea:disabled, select:disabled { opacity: .52; cursor: default; }
     button[aria-busy="true"]:disabled { opacity: .82; }
-    @media (forced-colors: active) { .saved, .warn, .feedback, .badge, input, textarea, select { border: 1px solid CanvasText; } }
+    @media (forced-colors: active) { .saved, .warn, .feedback, .badge, .cd-tip, .actions-box, input, textarea, select { border: 1px solid CanvasText; } }
   </style>
 </head>
 <body>
   <header>
     <div class="header-inner">
-      <h1>Deploy From This Computer</h1>
-      <p id="connection" role="status"></p>
+      <div>
+        <h1>Deploy From This Computer</h1>
+        <p id="connection" role="status"></p>
+      </div>
+      <button type="button" id="open-activity-header">Computer Activity</button>
     </div>
   </header>
   <main>
-    <p class="hint">Save the commands you use to deploy an app. When a change of yours to that app merges, 1904 asks this computer to run them.
+    <p class="intro">Save the commands you use to deploy an app. When a change of yours to that app merges, 1904 asks this computer to run them.
       1904 only says which app and which commit: the commands stay on this computer and only you can change them, here.</p>
     <p class="warn" id="notice" hidden></p>
     <form id="form" autocomplete="off">
-      <fieldset id="fields">
-        <label class="field"><span>App</span>
-          <select id="app"></select>
-        </label>
-        <p class="hint" id="apps-empty" hidden>No apps to show yet. Apps you can work on in 1904 appear here.</p>
-        <ol class="steps" id="steps" aria-label="Setup for this app"></ol>
-        <fieldset>
-          <legend>Where the commands run</legend>
-          <label class="choice"><input type="radio" name="where" value="host" checked><span>On a host, over SSH</span></label>
-          <label class="choice"><input type="radio" name="where" value="custom"><span>Through a connect command I type</span></label>
-          <label class="choice"><input type="radio" name="where" value="local"><span>On this computer</span></label>
-        </fieldset>
-        <div id="host-fields">
-          <div class="row">
-            <label class="field grow"><span>Host</span>
-              <input type="text" id="host-name" spellcheck="false" autocapitalize="off" placeholder="deploy.example.com">
-            </label>
-            <label class="field"><span>User name</span>
-              <input type="text" id="host-user" spellcheck="false" autocapitalize="off" placeholder="deploy">
-            </label>
-            <label class="field narrow"><span>Port</span>
-              <input type="number" id="host-port" min="1" max="65535" step="1" placeholder="22">
-            </label>
-          </div>
-          <label class="field"><span>Sign in with</span>
-            <select id="auth">
-              <option value="key">A deploy key 1904 Desktop makes (recommended)</option>
-              <option value="ssh">My own SSH setup: my keys, agent and SSH settings</option>
-              <option value="password-saved">A password, saved on this computer</option>
-              <option value="password-ask">A password I type at each deploy</option>
-            </select>
+      <div class="workspace">
+        <fieldset id="fields" class="workspace-main">
+          <label class="field"><span>App</span>
+            <select id="app"></select>
           </label>
-          <p class="hint" id="auth-hint"></p>
-          <div class="box" id="identity-box">
-            <div class="box-head">
-              <span class="box-title-wrap"><span class="box-title">Host identity</span></span>
-              <button type="button" id="check-host" aria-busy="false">
-                <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
-                <span id="check-host-label">Check host</span>
-              </button>
-            </div>
-            <p class="hint" id="identity-text"></p>
-            <ul class="prints" id="identity-keys"></ul>
-            <button type="button" id="trust-host" hidden>Trust this host</button>
-            <div class="feedback" id="identity-feedback" hidden role="status" aria-live="polite">
-              <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
-              <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
-              <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
-              <div class="feedback-body">
-                <span class="feedback-title" id="identity-feedback-title"></span>
-                <span class="feedback-detail" id="identity-feedback-detail" hidden></span>
-              </div>
-            </div>
-          </div>
-          <div class="box" id="key-box">
-            <div class="box-head">
-              <span class="box-title-wrap">
-                <span class="box-title">Deploy key</span>
-                <span class="badge" id="key-added-badge" hidden>
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 5"/></svg>
-                  <span>Added on host</span>
-                </span>
-              </span>
-              <button type="button" id="make-key" aria-busy="false">
-                <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
-                <span id="make-key-label">Create deploy key</span>
-              </button>
-            </div>
-            <p class="hint" id="key-text"></p>
-            <div id="key-install" hidden>
-              <label class="field"><span>Add it on the host with your password, typed once and not saved</span>
-                <span class="inline-row">
-                  <input type="password" id="install-password" autocomplete="off" spellcheck="false" placeholder="Password for the host">
-                  <button type="button" class="action" id="install-key" aria-busy="false">
-                    <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
-                    <span id="install-key-label">Add key</span>
-                  </button>
-                </span>
+          <p class="hint" id="apps-empty" hidden>No apps to show yet. Apps you can work on in 1904 appear here.</p>
+          <fieldset>
+            <legend>Where the commands run</legend>
+            <label class="choice"><input type="radio" name="where" value="host" checked><span>On a host, over SSH</span></label>
+            <label class="choice"><input type="radio" name="where" value="custom"><span>Through a connect command I type</span></label>
+            <label class="choice"><input type="radio" name="where" value="local"><span>On this computer</span></label>
+          </fieldset>
+          <div id="host-fields">
+            <div class="row">
+              <label class="field grow"><span>Host</span>
+                <input type="text" id="host-name" spellcheck="false" autocapitalize="off" placeholder="deploy.example.com">
               </label>
-              <p class="hint" id="key-trust-note" hidden></p>
+              <label class="field"><span>User name</span>
+                <input type="text" id="host-user" spellcheck="false" autocapitalize="off" placeholder="deploy">
+              </label>
+              <label class="field narrow"><span>Port</span>
+                <input type="number" id="host-port" min="1" max="65535" step="1" placeholder="22">
+              </label>
             </div>
-            <div class="feedback" id="key-feedback" hidden role="status" aria-live="polite">
-              <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
-              <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
-              <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
-              <div class="feedback-body">
-                <span class="feedback-title" id="key-feedback-title"></span>
-                <span class="feedback-detail" id="key-feedback-detail" hidden></span>
+            <label class="field"><span>Sign in with</span>
+              <select id="auth">
+                <option value="key">A deploy key 1904 Desktop makes (recommended)</option>
+                <option value="ssh">My own SSH setup: my keys, agent and SSH settings</option>
+                <option value="password-saved">A password, saved on this computer</option>
+                <option value="password-ask">A password I type at each deploy</option>
+              </select>
+            </label>
+            <p class="hint" id="auth-hint"></p>
+            <div class="box" id="identity-box">
+              <div class="box-head">
+                <span class="box-title-wrap"><span class="box-title">Host identity</span></span>
+                <button type="button" id="check-host" aria-busy="false">
+                  <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                  <span id="check-host-label">Check host</span>
+                </button>
+              </div>
+              <p class="hint" id="identity-text"></p>
+              <ul class="prints" id="identity-keys"></ul>
+              <button type="button" id="trust-host" hidden>Trust this host</button>
+              <div class="feedback" id="identity-feedback" hidden role="status" aria-live="polite">
+                <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
+                <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
+                <div class="feedback-body">
+                  <span class="feedback-title" id="identity-feedback-title"></span>
+                  <span class="feedback-detail" id="identity-feedback-detail" hidden></span>
+                </div>
               </div>
             </div>
-            <div id="key-manual" hidden>
-              <p class="hint">Or add it yourself: run this on the host as that user. <button type="button" class="link" id="copy-install">Copy the command</button></p>
-              <pre id="install-command"></pre>
+            <div class="box" id="key-box">
+              <div class="box-head">
+                <span class="box-title-wrap">
+                  <span class="box-title">Deploy key</span>
+                  <span class="badge" id="key-added-badge" hidden>
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 5"/></svg>
+                    <span>Added on host</span>
+                  </span>
+                </span>
+                <button type="button" id="make-key" aria-busy="false">
+                  <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                  <span id="make-key-label">Create deploy key</span>
+                </button>
+              </div>
+              <p class="hint" id="key-text"></p>
+              <div id="key-install" hidden>
+                <label class="field"><span>Add it on the host with your password, typed once and not saved</span>
+                  <span class="inline-row">
+                    <input type="password" id="install-password" autocomplete="off" spellcheck="false" placeholder="Password for the host">
+                    <button type="button" class="action" id="install-key" aria-busy="false">
+                      <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                      <span id="install-key-label">Add key</span>
+                    </button>
+                  </span>
+                </label>
+                <p class="hint" id="key-trust-note" hidden></p>
+              </div>
+              <div class="feedback" id="key-feedback" hidden role="status" aria-live="polite">
+                <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
+                <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
+                <div class="feedback-body">
+                  <span class="feedback-title" id="key-feedback-title"></span>
+                  <span class="feedback-detail" id="key-feedback-detail" hidden></span>
+                </div>
+              </div>
+              <div id="key-manual" hidden>
+                <p class="hint">Or add it yourself: run this on the host as that user. <button type="button" class="link" id="copy-install">Copy the command</button></p>
+                <pre id="install-command"></pre>
+              </div>
+            </div>
+            <div class="box" id="password-box">
+              <label class="field"><span>Password</span>
+                <input type="password" id="host-password" autocomplete="off" spellcheck="false">
+              </label>
+              <p class="hint">Kept encrypted with this computer’s secure storage, and used only to sign in to this host when this app deploys.</p>
             </div>
           </div>
-          <div class="box" id="password-box">
-            <label class="field"><span>Password</span>
-              <input type="password" id="host-password" autocomplete="off" spellcheck="false">
+          <div id="custom-fields" hidden>
+            <label class="field"><span>How to connect</span>
+              <input type="text" id="connect" spellcheck="false" autocapitalize="off" placeholder="ssh deploy@your-host">
             </label>
-            <p class="hint">Kept encrypted with this computer’s secure storage, and used only to sign in to this host when this app deploys.</p>
+            <p class="hint">A command that reaches the host and runs what is given to it, such as ssh with a host from your SSH settings. It must work without typing anything.</p>
           </div>
-        </div>
-        <div id="custom-fields" hidden>
-          <label class="field"><span>How to connect</span>
-            <input type="text" id="connect" spellcheck="false" autocapitalize="off" placeholder="ssh deploy@your-host">
-          </label>
-          <p class="hint">A command that reaches the host and runs what is given to it, such as ssh with a host from your SSH settings. It must work without typing anything.</p>
-        </div>
-        <div id="folder-fields">
-          <label class="field"><span>App folder on the host</span>
-            <input type="text" id="folder" spellcheck="false" autocapitalize="off" placeholder="/srv/my-app">
-          </label>
-          <p class="hint" id="folder-hint"></p>
-        </div>
-        <label class="field"><span>Commands</span>
-          <textarea id="commands" spellcheck="false" autocapitalize="off" placeholder="git pull --ff-only&#10;npm ci&#10;npm run build&#10;sudo systemctl restart my-app"></textarea>
-        </label>
-        <p class="hint">One per line, run in order, starting in the app folder. The deploy stops at the first command that fails. DEPLOY_SHA and DEPLOY_BRANCH hold the merged commit and its branch.
-          Dry run checks the folder, git and these commands on the host without running any, and suggests build commands from what it finds there.</p>
-        <p class="hint" id="local-note" hidden>On this computer, PowerShell runs these. In PowerShell 7.4 or later a program that fails stops the deploy;
-          in Windows PowerShell 5 only a failed cmdlet does, so end with your own check there.</p>
-        <fieldset>
-          <legend>Log</legend>
-          <label class="choice"><input type="radio" name="log" value="output" checked><span>What the commands print</span></label>
-          <label class="choice"><input type="radio" name="log" value="file"><span>A log file the commands write on the host</span>
-            <span class="hint">After the commands finish, the end of that file is read back.</span></label>
-          <label class="choice"><input type="radio" name="log" value="write"><span>Write a log file on the host</span>
-            <span class="hint">Everything the commands print is added to that file and its end is read back. The file is tried first: if it cannot be written, the commands still run, without it.</span></label>
-          <label class="field" id="log-path-row" hidden><span>Log file on the host</span>
-            <input type="text" id="log-path" spellcheck="false" autocapitalize="off" placeholder="/var/log/my-app/deploy.log">
-          </label>
-        </fieldset>
-        <fieldset>
-          <legend>When it runs</legend>
-          <label class="choice"><input type="checkbox" id="auto" checked><span>Deploy when a change of mine merges</span>
-            <span class="hint">Off: this app deploys only when you choose Deploy now in 1904 or Run now here.</span></label>
-          <label class="choice"><input type="checkbox" id="no-approval"><span>Submit without approval</span>
-            <span class="hint">These commands run without a prompt on this computer. You are asked once now, and again whenever you change them.</span></label>
-          <div class="order">
-            <label for="position">Deploy order</label>
-            <input type="number" id="position" min="1" max="99" step="1" value="10">
-            <span class="hint">When several apps change together, lower numbers deploy first, one at a time.</span>
+          <div id="folder-fields">
+            <label class="field"><span>App folder on the host</span>
+              <input type="text" id="folder" spellcheck="false" autocapitalize="off" placeholder="/srv/my-app">
+            </label>
+            <p class="hint" id="folder-hint"></p>
+            <div class="cd-tip" id="folder-cd-tip" hidden>
+              <span id="folder-cd-text"></span>
+              <button type="button" id="use-cd-folder">Move to App folder</button>
+            </div>
           </div>
-          <label class="choice"><input type="checkbox" id="stop-on-failure"><span>If this deploy fails, skip the apps after it</span></label>
+          <label class="field"><span>Commands</span>
+            <textarea id="commands" spellcheck="false" autocapitalize="off" placeholder="git pull --ff-only&#10;npm ci&#10;npm run build&#10;sudo systemctl restart my-app"></textarea>
+          </label>
+          <p class="hint">One per line, run in order, starting in the app folder. The deploy stops at the first command that fails. DEPLOY_SHA and DEPLOY_BRANCH hold the merged commit and its branch.
+            Dry run checks the folder, git and these commands on the host without running any, and suggests build commands from what it finds there.</p>
+          <p class="hint" id="local-note" hidden>On this computer, PowerShell runs these. In PowerShell 7.4 or later a program that fails stops the deploy;
+            in Windows PowerShell 5 only a failed cmdlet does, so end with your own check there.</p>
+          <fieldset>
+            <legend>Log</legend>
+            <label class="choice"><input type="radio" name="log" value="output" checked><span>What the commands print</span></label>
+            <label class="choice"><input type="radio" name="log" value="file"><span>A log file the commands write on the host</span>
+              <span class="hint">After the commands finish, the end of that file is read back.</span></label>
+            <label class="choice"><input type="radio" name="log" value="write"><span>Write a log file on the host</span>
+              <span class="hint">Everything the commands print is added to that file and its end is read back. The file is tried first: if it cannot be written, the commands still run, without it.</span></label>
+            <label class="field" id="log-path-row" hidden><span>Log file on the host</span>
+              <input type="text" id="log-path" spellcheck="false" autocapitalize="off" placeholder="/var/log/my-app/deploy.log">
+            </label>
+          </fieldset>
+          <fieldset>
+            <legend>When it runs</legend>
+            <label class="choice"><input type="checkbox" id="auto" checked><span>Deploy when a change of mine merges</span>
+              <span class="hint">Off: this app deploys only when you choose Deploy now in 1904 or Run now here.</span></label>
+            <label class="choice"><input type="checkbox" id="no-approval"><span>Submit without approval</span>
+              <span class="hint">These commands run without a prompt on this computer. You are asked once now, and again whenever you change them.</span></label>
+            <div class="order">
+              <label for="position">Deploy order</label>
+              <input type="number" id="position" min="1" max="99" step="1" value="10">
+              <span class="hint">When several apps change together, lower numbers deploy first, one at a time.</span>
+            </div>
+            <label class="choice"><input type="checkbox" id="stop-on-failure"><span>If this deploy fails, skip the apps after it</span></label>
+          </fieldset>
         </fieldset>
-      </fieldset>
-      <div class="actions">
-        <button type="button" class="primary" id="save">Save</button>
-        <button type="button" id="dry-run">Dry run</button>
-        <button type="button" id="run">Run now</button>
-        <span class="spacer"></span>
-        <button type="button" id="remove">Remove</button>
-      </div>
-      <p id="status" role="status" aria-live="polite"></p>
-      <div class="feedback" id="run-feedback" hidden role="status" aria-live="polite">
-        <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
-        <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
-        <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
-        <div class="feedback-body">
-          <span class="feedback-title" id="run-feedback-title"></span>
-          <span class="feedback-detail" id="run-feedback-detail" hidden></span>
-        </div>
-      </div>
-      <pre id="dry-output" hidden tabindex="0" aria-label="Deploy and dry run output"></pre>
-      <div class="box" id="suggest-box" hidden>
-        <span class="box-title">Suggested commands</span>
-        <p class="hint" id="suggest-text"></p>
-        <pre id="suggest-lines"></pre>
-        <button type="button" id="suggest-use">Add to the commands</button>
+        <aside class="workspace-rail" aria-label="Setup status and test output">
+          <ol class="steps" id="steps" aria-label="Setup for this app"></ol>
+          <div class="actions-box">
+            <div class="actions">
+              <button type="button" class="primary" id="save">Save</button>
+              <button type="button" id="dry-run" aria-busy="false">
+                <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                <span id="dry-run-label">Dry run</span>
+              </button>
+              <button type="button" id="run" aria-busy="false">
+                <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                <span id="run-label">Run now</span>
+              </button>
+              <span class="spacer"></span>
+              <button type="button" id="remove">Remove</button>
+            </div>
+            <p id="status" role="status" aria-live="polite"></p>
+          </div>
+          <div class="feedback" id="run-feedback" hidden role="status" aria-live="polite">
+            <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+            <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
+            <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
+            <div class="feedback-body">
+              <span class="feedback-title" id="run-feedback-title"></span>
+              <span class="feedback-detail" id="run-feedback-detail" hidden></span>
+              <span class="feedback-hint" id="run-feedback-hint" hidden></span>
+            </div>
+          </div>
+          <div class="output-wrap" id="output-wrap" hidden>
+            <div class="output-bar">
+              <span class="output-title" id="output-title">Output</span>
+              <span class="output-actions">
+                <button type="button" class="link" id="copy-output">Copy output</button>
+                <button type="button" class="link" id="open-activity">Open Computer Activity</button>
+              </span>
+            </div>
+            <pre id="dry-output" hidden tabindex="0" aria-label="Deploy and dry run output"></pre>
+          </div>
+          <div class="box" id="suggest-box" hidden>
+            <span class="box-title">Suggested commands</span>
+            <p class="hint" id="suggest-text"></p>
+            <pre id="suggest-lines"></pre>
+            <button type="button" id="suggest-use">Add to the commands</button>
+          </div>
+        </aside>
       </div>
     </form>
     <section aria-labelledby="saved-title">
-      <h2 id="saved-title">Apps that deploy from this computer</h2>
+      <div class="saved-head">
+        <h2 id="saved-title">Apps that deploy from this computer</h2>
+      </div>
       <p class="hint" id="saved-empty">None yet.</p>
       <ul id="saved"></ul>
     </section>
