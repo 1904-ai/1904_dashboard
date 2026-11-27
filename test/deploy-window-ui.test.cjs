@@ -457,3 +457,75 @@ test('Dry run and Run now stay busy until result arrives, show actionable hint, 
   ui.$('open-activity-header').click();
   assert.equal(ui.sent.at(-1).channel, '1904:deploy-open-activity');
 });
+
+test('Failed Dry run with gitAuth opens inline Fix git sign-in assistant for HTTPS and SSH, and re-runs Dry run on verify', async () => {
+  const ui = loadDeployWindow({
+    state: baseState({ trusted: true }),
+    async onInvoke(channel) {
+      if (channel === '1904:deploy-git-auth-https') return { ok: true };
+      if (channel === '1904:deploy-git-auth-ssh') return { ok: true, publicKey: KEY, fetchOk: false };
+      return { ok: true };
+    },
+  });
+  await ui.flush();
+
+  assert.equal(ui.$('git-auth-box').hidden, true);
+  ui.emit('1904:deploy-dry-run-result', {
+    appId: 'app_openls',
+    ok: false,
+    status: 'failed',
+    exitCode: 1,
+    message: 'CANNOT PULL',
+    gitAuth: { needsAuth: true, folder: '/opt/openls', origin: 'http://192.168.2.100:3000/adam/openls.git', scheme: 'https', httpHost: '192.168.2.100:3000' },
+    output: 'CANNOT PULL: the host could not read origin without a password',
+  });
+  assert.equal(ui.$('git-auth-box').hidden, false);
+  assert.match(ui.$('git-auth-target').textContent, /\/opt\/openls.*192\.168\.2\.100:3000/);
+  assert.equal(ui.$('git-https-panel').hidden, false);
+  assert.equal(ui.$('git-ssh-panel').hidden, true);
+  assert.equal(ui.$('git-save-https').disabled, true, 'disabled until username and token are entered');
+
+  ui.$('git-username').value = 'adam';
+  ui.$('git-token').value = 'tok-123';
+  ui.$('form').dispatchEvent({ type: 'input' });
+  assert.equal(ui.$('git-save-https').disabled, false);
+
+  ui.$('git-save-https').click();
+  assert.equal(ui.$('git-token').value, '', 'token cleared immediately on submit');
+  await ui.flush();
+
+  const httpsCall = ui.invoked.find(call => call.channel === '1904:deploy-git-auth-https');
+  assert.deepEqual(JSON.parse(JSON.stringify(httpsCall.args)), ['app_openls', { folder: '/opt/openls', origin: 'http://192.168.2.100:3000/adam/openls.git', username: 'adam', token: 'tok-123' }]);
+  assert.equal(ui.$('git-auth-feedback').dataset.kind, 'ok');
+  assert.equal(ui.$('git-auth-feedback-title').textContent, 'Git sign-in verified');
+  assert.ok(ui.invoked.some(call => call.channel === '1904:deploy-dry-run'), 'automatically re-runs Dry run after credentials verify');
+
+  // When the follow-up Dry run passes, the assistant hides cleanly.
+  ui.emit('1904:deploy-dry-run-result', { appId: 'app_openls', ok: true, status: 'done', exitCode: 0, output: 'Nothing found that would stop a deploy.' });
+  assert.equal(ui.$('git-auth-box').hidden, true);
+
+  // SSH remote opens in SSH mode, displays the generated public key, and copies it safely.
+  ui.emit('1904:deploy-dry-run-result', {
+    appId: 'app_openls',
+    ok: false,
+    status: 'failed',
+    exitCode: 1,
+    gitAuth: { needsAuth: true, folder: '/opt/openls', origin: 'git@github.com:org/openls.git', scheme: 'ssh', httpHost: '' },
+    output: 'CANNOT PULL',
+  });
+  assert.equal(ui.$('git-auth-box').hidden, false);
+  assert.equal(ui.$('git-https-panel').hidden, true);
+  assert.equal(ui.$('git-ssh-panel').hidden, false);
+  assert.equal(ui.$('git-ssh-remote-row').hidden, true, 'already SSH remote hides optional remote override');
+
+  ui.$('git-make-ssh-key').click();
+  await ui.flush();
+  assert.equal(ui.$('git-ssh-key-result').hidden, false);
+  assert.equal(ui.$('git-ssh-pubkey').textContent, KEY);
+
+  ui.$('copy-git-pubkey').click();
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.sent.at(-1))), { channel: '1904:deploy-copy-pubkey', args: [KEY] });
+  assert.equal(ui.$('copy-git-pubkey').textContent, 'Copied to clipboard');
+  ui.runTimers();
+  assert.equal(ui.$('copy-git-pubkey').textContent, 'Copy public key');
+});

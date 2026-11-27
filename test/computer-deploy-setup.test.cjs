@@ -251,3 +251,105 @@ test('deployHint returns actionable guidance for common non-interactive deploy f
   assert.match(deploy.deployHint({ stderr: 'sudo: a terminal is required to read the password' }), /NOPASSWD/i);
   assert.equal(deploy.deployHint({ output: 'Already up to date.', stderr: '' }), '');
 });
+
+test('parseDryRunGit extracts folder, origin and auth scheme from Dry run output', () => {
+  const httpFail = deploy.parseDryRunGit([
+    'Connected as root on lxc-openls.',
+    'The app folder is there: /opt/openls',
+    "origin is this app's repository: http://192.168.2.100:3000/adam/openls.git",
+    'CANNOT PULL: the host could not read origin without a password or passphrase.',
+  ].join('\n'));
+  assert.deepEqual(httpFail, {
+    needsAuth: true,
+    folder: '/opt/openls',
+    origin: 'http://192.168.2.100:3000/adam/openls.git',
+    scheme: 'https',
+    httpHost: '192.168.2.100:3000',
+  });
+
+  const sshFail = deploy.parseDryRunGit([
+    'The app folder is there: /srv/realzy',
+    'origin: git@github.com:org/realzy.git',
+    'CANNOT PULL: the host could not read origin without a password or passphrase.',
+  ].join('\n'));
+  assert.deepEqual(sshFail, {
+    needsAuth: true,
+    folder: '/srv/realzy',
+    origin: 'git@github.com:org/realzy.git',
+    scheme: 'ssh',
+    httpHost: '',
+  });
+
+  const okRun = deploy.parseDryRunGit([
+    'The app folder is there: /opt/openls',
+    "origin is this app's repository: http://192.168.2.100:3000/adam/openls.git",
+    'The host can read origin without typing anything, so git pull will not stop to ask.',
+  ].join('\n'));
+  assert.equal(okRun.needsAuth, false);
+});
+
+test('gitAuthHttpsPlan pipes credentials only via stdin, never in the script, and rejects bad credentials on failed fetch', { skip: !hasGit }, t => {
+  assert.equal(deploy.gitAuthHttpsPlan({ folder: '/opt/openls', origin: 'git@github.com:a/b.git', username: 'u', token: 't', nonce: NONCE }).ok, false);
+  assert.equal(deploy.gitAuthHttpsPlan({ folder: '/opt/openls', origin: 'http://192.168.2.100:3000/a/b.git', username: 'u\nbar', token: 't', nonce: NONCE }).ok, false);
+  assert.equal(deploy.gitAuthHttpsPlan({ folder: '/opt/openls', origin: 'http://192.168.2.100:3000/a/b.git', username: 'u', token: 'tok\nline2', nonce: NONCE }).ok, false);
+
+  const dir = dataFolder(t);
+  const home = join(dir, 'home');
+  mkdirSync(home);
+  const env = { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' };
+  const git = (cwd, ...args) => { const ran = spawnSync('git', args, { cwd, env, encoding: 'utf8' }); assert.equal(ran.status, 0, `git ${args.join(' ')}: ${ran.stderr}`); };
+
+  // scriptWordWithStdin preserves fd 0 for the decoded script.
+  const echoIn = spawnSync('/bin/sh', ['-c', deploy.scriptWordWithStdin('cat')], { input: 'stdin-preserved\n', encoding: 'utf8', env });
+  assert.equal(echoIn.status, 0);
+  assert.equal(echoIn.stdout, 'stdin-preserved\n');
+
+  const app = join(dir, 'openls');
+  mkdirSync(app);
+  git(app, 'init', '-q');
+  git(app, 'remote', 'add', 'origin', 'http://127.0.0.1:9/adam/openls.git');
+
+  const secretToken = 'not-a-real-token-987654'; // gitleaks:allow
+  const plan = deploy.gitAuthHttpsPlan({ folder: app, origin: 'http://127.0.0.1:9/adam/openls.git', username: 'adam', token: secretToken, nonce: NONCE });
+  assert.equal(plan.ok, true);
+  assert.ok(!plan.script.includes(secretToken) && !plan.word.includes(secretToken), 'token never appears in script or ssh word');
+  assert.ok(plan.stdin.includes(`password=${secretToken}\n`), 'token travels only on stdin');
+
+  // Runs against unreachable port 9: approves, tests fetch, fails, then rejects bad credential cleanly.
+  const ran = spawnSync('/bin/sh', ['-c', plan.word], { input: plan.stdin, encoding: 'utf8', cwd: dir, env });
+  const parsed = deploy.readDeployOutput(ran.stdout, NONCE);
+  assert.equal(parsed.confirmed, true);
+  assert.equal(parsed.status, 1);
+  assert.equal(readFileSync(join(home, '.config/1904-git/credentials'), 'utf8').trim(), '', 'failed credential is rejected back out');
+  const helper = spawnSync('git', ['config', '--local', '--get-all', 'credential.helper'], { cwd: app, env, encoding: 'utf8' }).stdout;
+  assert.match(helper, /store --file=.*1904-git\/credentials/);
+});
+
+test('gitAuthSshPlan creates a repo-scoped ed25519 key on the host, configures core.sshCommand and reuses it', { skip: !hasGit || !existsSync('/usr/bin/ssh-keygen') }, t => {
+  assert.equal(deploy.gitAuthSshPlan({ folder: '/opt/openls', slug: 'openls', remoteUrl: 'git@host:a;rm -rf /', nonce: NONCE }).ok, false);
+
+  const dir = dataFolder(t);
+  const home = join(dir, 'home');
+  mkdirSync(home);
+  const env = { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' };
+  const git = (cwd, ...args) => { const ran = spawnSync('git', args, { cwd, env, encoding: 'utf8' }); assert.equal(ran.status, 0, `git ${args.join(' ')}: ${ran.stderr}`); };
+
+  const app = join(dir, 'openls');
+  mkdirSync(app);
+  git(app, 'init', '-q');
+  git(app, 'remote', 'add', 'origin', 'http://127.0.0.1:9/adam/openls.git');
+
+  const first = deploy.gitAuthSshPlan({ folder: app, slug: 'OpenLS', remoteUrl: 'ssh://git@127.0.0.1:9/adam/openls.git', nonce: NONCE });
+  assert.equal(first.ok, true);
+  const ran1 = spawnSync('/bin/sh', ['-s'], { input: first.script, encoding: 'utf8', cwd: dir, env });
+  assert.equal(deploy.readDeployOutput(ran1.stdout, NONCE).status, 0, ran1.stderr);
+  const out1 = deploy.readGitAuthSshOutput(ran1.stdout, NONCE);
+  assert.match(out1.publicKey, /^ssh-ed25519 \S+ 1904-repo-openls$/);
+  assert.equal(out1.fetchOk, false);
+  assert.equal(spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: app, env, encoding: 'utf8' }).stdout.trim(), 'ssh://git@127.0.0.1:9/adam/openls.git');
+  assert.match(spawnSync('git', ['config', '--local', '--get', 'core.sshCommand'], { cwd: app, env, encoding: 'utf8' }).stdout, /1904-repo-openls/);
+
+  // Running again reuses the existing keypair rather than rotating it.
+  const ran2 = spawnSync('/bin/sh', ['-s'], { input: first.script, encoding: 'utf8', cwd: dir, env });
+  assert.equal(deploy.readGitAuthSshOutput(ran2.stdout, NONCE).publicKey, out1.publicKey);
+});

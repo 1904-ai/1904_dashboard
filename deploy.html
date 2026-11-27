@@ -104,8 +104,14 @@
     .steps .mark { font-weight: 700; text-align: center; color: var(--muted); }
     .steps li[data-state="ok"] .mark { color: var(--run); }
     .steps li[data-state="problem"] .mark { color: var(--bad); }
+    .steps li[data-current="true"] { padding-left: 8px; margin-left: -10px; border-left: 2px solid var(--focus); }
     .steps .step-name { font-weight: 600; }
     .steps .step-text { grid-column: 2; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .git-auth-box .field { margin-top: 8px; }
+    .git-auth-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    #git-ssh-key-result { margin-top: 10px; }
+    #git-ssh-key-result pre { margin-top: 6px; }
+    #git-verify-dry-run { margin-top: 8px; }
     #suggest-use { margin-top: 8px; }
     button.link { border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; color: var(--text); font: inherit; background: transparent; min-width: 0; }
     button.link[data-copied="true"] { color: var(--run); text-decoration: none; font-weight: 600; }
@@ -331,6 +337,58 @@
               <span class="feedback-title" id="run-feedback-title"></span>
               <span class="feedback-detail" id="run-feedback-detail" hidden></span>
               <span class="feedback-hint" id="run-feedback-hint" hidden></span>
+            </div>
+          </div>
+          <div class="box git-auth-box" id="git-auth-box" hidden>
+            <div class="box-head">
+              <span class="box-title">Fix git sign-in on the host</span>
+            </div>
+            <p class="hint" id="git-auth-target"></p>
+            <fieldset>
+              <legend>How the host should sign in to git</legend>
+              <label class="choice"><input type="radio" name="git-auth-mode" value="https" checked><span>Save git username &amp; token on the host</span></label>
+              <label class="choice"><input type="radio" name="git-auth-mode" value="ssh"><span>Use a host-side SSH deploy key</span></label>
+            </fieldset>
+            <div id="git-https-panel">
+              <label class="field"><span>Git username</span>
+                <input type="text" id="git-username" spellcheck="false" autocapitalize="off" placeholder="username">
+              </label>
+              <label class="field"><span>Personal access token or password</span>
+                <input type="password" id="git-token" autocomplete="off" spellcheck="false" placeholder="Token or password">
+              </label>
+              <p class="hint">Sent once over SSH stdin into a chmod 600 credential file for this repo on the host, then verified with git fetch --dry-run. Never saved by 1904.</p>
+              <div class="git-auth-actions">
+                <button type="button" class="action" id="git-save-https" aria-busy="false">
+                  <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                  <span id="git-save-https-label">Save &amp; test git fetch</span>
+                </button>
+              </div>
+            </div>
+            <div id="git-ssh-panel" hidden>
+              <label class="field" id="git-ssh-remote-row" hidden><span>SSH remote URL (optional — switches origin from HTTP to SSH)</span>
+                <input type="text" id="git-ssh-remote" spellcheck="false" autocapitalize="off" placeholder="git@host:owner/repo.git">
+              </label>
+              <p class="hint">Creates (or reuses) an ed25519 key in ~/.ssh on the host and scopes this repository to it via core.sshCommand.</p>
+              <div class="git-auth-actions">
+                <button type="button" class="action" id="git-make-ssh-key" aria-busy="false">
+                  <svg class="btn-spin icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+                  <span id="git-make-ssh-key-label">Create / show host deploy key</span>
+                </button>
+              </div>
+              <div id="git-ssh-key-result" hidden>
+                <p class="hint">Add this read-only deploy key in your Git provider (Gitea / GitHub → Repository Settings → Deploy Keys), then verify below. <button type="button" class="link" id="copy-git-pubkey">Copy public key</button></p>
+                <pre id="git-ssh-pubkey"></pre>
+                <button type="button" id="git-verify-dry-run">Verify with Dry run</button>
+              </div>
+            </div>
+            <div class="feedback" id="git-auth-feedback" hidden role="status" aria-live="polite">
+              <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+              <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
+              <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
+              <div class="feedback-body">
+                <span class="feedback-title" id="git-auth-feedback-title"></span>
+                <span class="feedback-detail" id="git-auth-feedback-detail" hidden></span>
+              </div>
             </div>
           </div>
           <div class="output-wrap" id="output-wrap" hidden>

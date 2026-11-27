@@ -19,6 +19,9 @@ let trusted = [];
 let seen = [];
 /** Build commands the last dry run suggested for the selected app, until they are added or the app changes. */
 let suggested;
+/** Non-interactive git auth info from the last failed Dry run (`{ folder, origin, scheme, httpHost }`). */
+let gitAuth;
+let gitSshPubKey = '';
 /** A new setup starts with the one command every one of them needs. */
 const FIRST_COMMAND = 'git pull --ff-only';
 /** Matches computer-deploy.cjs LOG_PATH / DEPLOY_FOLDER_MAX for safe leading-cd detection. */
@@ -28,6 +31,7 @@ const DEPLOY_FOLDER_MAX = 200;
 let installedKey;
 let copyTimer;
 let copyOutputTimer;
+let copyGitKeyTimer;
 
 const AUTH_HINT = {
   key: '1904 Desktop makes a key for this app and keeps it encrypted on this computer. You add it on the host once; after that no password is needed.',
@@ -48,6 +52,7 @@ const keptFor = appId => state.kept?.[appId] ?? { password: false, publicKey: ''
 const checked = name => document.querySelector(`input[name="${name}"]:checked`)?.value;
 const logMode = () => checked('log') || 'output';
 const where = () => checked('where') || 'host';
+const gitAuthMode = () => checked('git-auth-mode') || 'https';
 const pick = (name, value) => { for (const input of document.querySelectorAll(`input[name="${name}"]`)) input.checked = input.value === value; };
 
 function say(text, kind = '') {
@@ -132,6 +137,47 @@ function resetCopyOutputNotice() {
   delete button.dataset.copied;
 }
 
+function resetCopyGitKeyNotice() {
+  if (copyGitKeyTimer) {
+    clearTimeout(copyGitKeyTimer);
+    copyGitKeyTimer = undefined;
+  }
+  const button = $('copy-git-pubkey');
+  button.textContent = 'Copy public key';
+  delete button.dataset.copied;
+}
+
+function clearGitAuth() {
+  gitAuth = undefined;
+  gitSshPubKey = '';
+  $('git-auth-box').hidden = true;
+  $('git-username').value = '';
+  $('git-token').value = '';
+  $('git-ssh-remote').value = '';
+  $('git-ssh-pubkey').textContent = '';
+  $('git-ssh-key-result').hidden = true;
+  setFeedback('git-auth-feedback');
+  resetCopyGitKeyNotice();
+}
+
+function showGitAuth() {
+  const shown = Boolean(gitAuth?.needsAuth);
+  $('git-auth-box').hidden = !shown;
+  if (!shown) return;
+  $('git-auth-target').textContent = `In ${gitAuth.folder} · origin ${gitAuth.origin}`;
+  const canHttps = gitAuth.scheme === 'https';
+  for (const input of document.querySelectorAll('input[name="git-auth-mode"]')) {
+    if (input.value === 'https') input.disabled = !canHttps;
+  }
+  if (!canHttps && gitAuthMode() === 'https') pick('git-auth-mode', 'ssh');
+  const mode = gitAuthMode();
+  $('git-https-panel').hidden = mode !== 'https';
+  $('git-ssh-panel').hidden = mode !== 'ssh';
+  $('git-ssh-remote-row').hidden = gitAuth.scheme === 'ssh';
+  $('git-ssh-key-result').hidden = !gitSshPubKey;
+  $('git-ssh-pubkey').textContent = gitSshPubKey;
+}
+
 function hideOutput() {
   $('output-wrap').hidden = true;
   $('dry-output').hidden = true;
@@ -152,8 +198,10 @@ function clearBoxFeedback() {
   setFeedback('identity-feedback');
   setFeedback('key-feedback');
   setFeedback('run-feedback');
+  setFeedback('git-auth-feedback');
   resetCopyNotice();
   resetCopyOutputNotice();
+  resetCopyGitKeyNotice();
 }
 
 /** The host as typed. The port is empty when it is left to the default (or, with the person's own SSH setup, to their settings). */
@@ -261,6 +309,7 @@ function fill(appId) {
   $('commands').value = recipe?.commands ?? FIRST_COMMAND;
   suggested = undefined;
   $('suggest-box').hidden = true;
+  clearGitAuth();
   pick('log', recipe?.log?.mode ?? 'output');
   $('log-path').value = recipe?.log?.path ?? '';
   $('auto').checked = recipe ? recipe.auto : true;
@@ -332,6 +381,15 @@ function enable() {
   $('dry-run-label').textContent = dryBusy ? 'Checking…' : 'Dry run';
   $('run-label').textContent = runBusy ? (activeAction === 'run' ? 'Starting…' : 'Deploying…') : 'Run now';
   $('remove').textContent = activeAction === 'remove' ? 'Removing…' : 'Remove';
+  const gitBusy = activeAction === 'git-https' || activeAction === 'git-ssh';
+  const canGitFix = usable && Boolean(recipe) && !recipe.stale && Boolean(gitAuth?.needsAuth) && !anyRunBusy;
+  $('git-save-https').disabled = !canGitFix || !$('git-username').value.trim() || !$('git-token').value;
+  $('git-save-https').setAttribute('aria-busy', String(activeAction === 'git-https'));
+  $('git-save-https-label').textContent = activeAction === 'git-https' ? 'Saving & testing…' : 'Save & test git fetch';
+  $('git-make-ssh-key').disabled = !canGitFix;
+  $('git-make-ssh-key').setAttribute('aria-busy', String(activeAction === 'git-ssh'));
+  $('git-make-ssh-key-label').textContent = activeAction === 'git-ssh' ? 'Setting up key…' : gitSshPubKey ? 'Re-check host deploy key' : 'Create / show host deploy key';
+  $('git-verify-dry-run').disabled = !usable || !recipe || recipe.stale || changed || anyRunBusy || gitBusy;
 }
 
 const when = at => new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
@@ -379,10 +437,13 @@ function renderSteps() {
   const recipe = recipeFor(selected);
   const marks = { ok: '✓', problem: '!', todo: '○' };
   const said = { ok: 'Done', problem: 'Needs attention', todo: 'To do' };
+  const steps = setupSteps(recipe, Boolean(recipe) && edited());
+  const currentIndex = steps.findIndex(step => step.state !== 'ok');
   $('steps').hidden = !selected;
-  $('steps').replaceChildren(...setupSteps(recipe, Boolean(recipe) && edited()).map(step => {
+  $('steps').replaceChildren(...steps.map((step, index) => {
     const item = node('li');
     item.dataset.state = step.state;
+    if (index === currentIndex) item.dataset.current = 'true';
     const mark = node('span', 'mark', marks[step.state]);
     mark.setAttribute('aria-label', said[step.state]);
     item.append(mark, node('span', 'step-name', step.name));
@@ -495,6 +556,110 @@ function userEdited() {
   enable();
 }
 
+async function startDryRun() {
+  if ($('dry-run').disabled) return;
+  hideOutput();
+  suggested = undefined;
+  showSuggestion();
+  say('');
+  const targetApp = selected;
+  runningJob = { appId: targetApp, kind: 'dry-run' };
+  setFeedback('run-feedback', {
+    kind: 'pending',
+    title: 'Running dry run…',
+    detail: 'Checking the connection, folder, git fetch, and commands on the host without running your commands.',
+  });
+  const answer = await act('dry-run', '1904:deploy-dry-run', targetApp);
+  if (!answer) return;
+  if (!answer.ok) {
+    if (runningJob?.appId === targetApp && runningJob.kind === 'dry-run') runningJob = undefined;
+    enable();
+    setFeedback('run-feedback', {
+      kind: 'error',
+      title: 'Dry run could not start',
+      detail: answer.error || 'Could not start.',
+    });
+    say(answer.error || 'Could not start.', 'error');
+  } else {
+    say('Checking on the host. Nothing is being run…');
+  }
+}
+
+async function saveGitHttps() {
+  if ($('git-save-https').disabled || !gitAuth?.needsAuth) return;
+  const username = $('git-username').value.trim();
+  const token = $('git-token').value;
+  $('git-token').value = '';
+  setFeedback('git-auth-feedback', {
+    kind: 'pending',
+    title: 'Saving git credentials & testing git fetch…',
+    detail: `Piping credentials over SSH stdin into a chmod 600 file for ${gitAuth.folder}, then running git fetch --dry-run.`,
+  });
+  const answer = await act('git-https', '1904:deploy-git-auth-https', selected, {
+    folder: gitAuth.folder,
+    origin: gitAuth.origin,
+    username,
+    token,
+  });
+  if (!answer) return;
+  if (answer.ok) {
+    setFeedback('git-auth-feedback', {
+      kind: 'ok',
+      title: 'Git sign-in verified',
+      detail: 'Credentials saved on the host (chmod 600) and git fetch --dry-run succeeded. Re-running Dry run…',
+    });
+    void startDryRun();
+  } else {
+    setFeedback('git-auth-feedback', {
+      kind: 'error',
+      title: 'Could not verify git credentials',
+      detail: answer.error || 'Check the username and token or password, then try again.',
+    });
+    if (!$('git-token').disabled) $('git-token').focus();
+  }
+}
+
+async function setupGitSshKey() {
+  if ($('git-make-ssh-key').disabled || !gitAuth?.needsAuth) return;
+  const remoteUrl = $('git-ssh-remote').value.trim();
+  setFeedback('git-auth-feedback', {
+    kind: 'pending',
+    title: 'Preparing host-side repo deploy key…',
+    detail: `Creating or reading an ed25519 key on the host for ${gitAuth.folder}.`,
+  });
+  const answer = await act('git-ssh', '1904:deploy-git-auth-ssh', selected, {
+    folder: gitAuth.folder,
+    remoteUrl,
+  });
+  if (!answer) return;
+  if (answer.ok) {
+    gitSshPubKey = answer.publicKey || '';
+    if (remoteUrl) gitAuth = { ...gitAuth, origin: remoteUrl, scheme: 'ssh' };
+    showGitAuth();
+    enable();
+    if (answer.fetchOk) {
+      setFeedback('git-auth-feedback', {
+        kind: 'ok',
+        title: 'Host deploy key verified',
+        detail: 'git fetch --dry-run succeeded with this key. Re-running Dry run…',
+      });
+      void startDryRun();
+    } else {
+      setFeedback('git-auth-feedback', {
+        kind: 'ok',
+        title: 'Host deploy key ready',
+        detail: 'Copy the public key above into your Git provider’s Deploy Keys, then choose Verify with Dry run.',
+      });
+    }
+  } else {
+    setFeedback('git-auth-feedback', {
+      kind: 'error',
+      title: 'Could not set up host deploy key',
+      detail: answer.error || 'Could not create the key on the host.',
+    });
+  }
+}
+
 async function installKey() {
   if ($('install-key').disabled) return;
   const password = $('install-password').value;
@@ -534,6 +699,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('host-user').addEventListener('input', userEdited);
   $('auth').addEventListener('change', () => { showParts(); enable(); });
   for (const name of ['where', 'log']) for (const input of document.querySelectorAll(`input[name="${name}"]`)) input.addEventListener('change', showParts);
+  for (const input of document.querySelectorAll('input[name="git-auth-mode"]')) input.addEventListener('change', () => { showGitAuth(); enable(); });
   // Any edit takes Run now and Dry run away until it is saved.
   $('form').addEventListener('input', enable);
   $('form').addEventListener('change', enable);
@@ -542,6 +708,24 @@ window.addEventListener('DOMContentLoaded', () => {
       event.preventDefault();
       void installKey();
     }
+  });
+  $('git-token').addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void saveGitHttps();
+    }
+  });
+  $('git-save-https').addEventListener('click', () => { void saveGitHttps(); });
+  $('git-make-ssh-key').addEventListener('click', () => { void setupGitSshKey(); });
+  $('git-verify-dry-run').addEventListener('click', () => { void startDryRun(); });
+  $('copy-git-pubkey').addEventListener('click', () => {
+    if (!gitSshPubKey) return;
+    ipcRenderer.send('1904:deploy-copy-pubkey', gitSshPubKey);
+    resetCopyGitKeyNotice();
+    const button = $('copy-git-pubkey');
+    button.textContent = 'Copied to clipboard';
+    button.dataset.copied = 'true';
+    copyGitKeyTimer = setTimeout(resetCopyGitKeyNotice, 2500);
   });
   for (const id of ['open-activity', 'open-activity-header']) {
     $(id).addEventListener('click', () => { ipcRenderer.send('1904:deploy-open-activity'); });
@@ -681,33 +865,7 @@ window.addEventListener('DOMContentLoaded', () => {
     $('commands').focus();
     say('Added. Read them, then Save.');
   });
-  $('dry-run').addEventListener('click', async () => {
-    hideOutput();
-    suggested = undefined;
-    showSuggestion();
-    say('');
-    const targetApp = selected;
-    runningJob = { appId: targetApp, kind: 'dry-run' };
-    setFeedback('run-feedback', {
-      kind: 'pending',
-      title: 'Running dry run…',
-      detail: 'Checking the connection, folder, git, and commands on the host without running your commands.',
-    });
-    const answer = await act('dry-run', '1904:deploy-dry-run', targetApp);
-    if (!answer) return;
-    if (!answer.ok) {
-      if (runningJob?.appId === targetApp && runningJob.kind === 'dry-run') runningJob = undefined;
-      enable();
-      setFeedback('run-feedback', {
-        kind: 'error',
-        title: 'Dry run could not start',
-        detail: answer.error || 'Could not start.',
-      });
-      say(answer.error || 'Could not start.', 'error');
-    } else {
-      say('Checking on the host. Nothing is being run…');
-    }
-  });
+  $('dry-run').addEventListener('click', () => { void startDryRun(); });
   $('run').addEventListener('click', async () => {
     hideOutput();
     suggested = undefined;
@@ -773,6 +931,16 @@ ipcRenderer.on('1904:deploy-dry-run-result', (_event, result) => {
   // Only fixed lines the main process chose from what the folder holds: text, never markup, and never added without a click.
   suggested = result.suggested && Array.isArray(result.suggested.lines) ? result.suggested : undefined;
   showSuggestion();
+  if (!result.ok && result.gitAuth?.needsAuth) {
+    const previousKey = gitAuth?.folder === result.gitAuth.folder ? gitSshPubKey : '';
+    gitAuth = result.gitAuth;
+    gitSshPubKey = previousKey;
+    pick('git-auth-mode', gitAuth.scheme === 'https' ? 'https' : 'ssh');
+    setFeedback('git-auth-feedback');
+    showGitAuth();
+  } else {
+    clearGitAuth();
+  }
   setFeedback('run-feedback', result.ok
     ? { kind: 'ok', title: 'Dry run passed', detail: 'Nothing found that would stop a deploy. No command was run.' }
     : {

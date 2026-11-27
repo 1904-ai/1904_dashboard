@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { COMPUTER_STDOUT_MAX, computerId, label, visibleLine, visibleText } = require('./computer-policy.cjs');
 const { promptFits } = require('./computer-approval.cjs');
-const { cleanHost, fingerprint, hostText, sshProblem } = require('./computer-deploy-ssh.cjs');
+const { cleanHost, fingerprint, hostText, publicKey, sshProblem } = require('./computer-deploy-ssh.cjs');
 
 const DEPLOYS_PATH = '/api/desktop/computer/deploys';
 const RECIPES_FILE = 'computer-deploys.json';
@@ -218,6 +218,14 @@ function scriptWord(script) {
   return `echo ${Buffer.from(script, 'utf8').toString('base64')} | base64 -d | sh`;
 }
 
+/**
+ * Like scriptWord, but runs the decoded script via `sh -c` so fd 0 (ssh's stdin) stays free for
+ * piping one-time input such as `git credential approve` without putting secrets in argv or the script.
+ */
+function scriptWordWithStdin(script) {
+  return `sh -c 'eval "$(echo ${Buffer.from(script, 'utf8').toString('base64')} | base64 -d)"'`;
+}
+
 const SHELL_WORDS = new Set(['cd', 'echo', 'export', 'set', 'unset', 'if', 'then', 'else', 'elif', 'fi', 'for', 'do', 'done', 'while', 'until', 'case', 'esac', 'exit', 'return',
   'test', 'true', 'false', 'source', 'read', 'wait', 'exec', 'eval', 'printf', 'pwd', 'umask', 'trap', 'shift', 'local', 'function', 'time', 'command', 'type', 'alias', 'sudo', 'env', 'nohup']);
 
@@ -265,8 +273,11 @@ function folderChecks(recipe) {
       `if [ "$__1904_name" = '${repo}' ]; then echo "origin is this app's repository: $__1904_origin"; else echo "CHECK: origin is $__1904_origin, but 1904 knows this app's repository as ${repo}. Make sure this folder is that repository."; fi`,
     ] : ['echo "origin: $__1904_origin"']),
     // Nobody is there to type in a deploy, so every way git or ssh could ask is turned off for this one read.
+    // Respect repo-local core.sshCommand (such as a host-side deploy key) while still forcing BatchMode=yes.
+    '__1904_ssh=$(git config --get core.sshCommand 2>/dev/null || true)',
+    '__1904_ssh="${__1904_ssh:-${GIT_SSH_COMMAND:-ssh}} -o BatchMode=yes -o ConnectTimeout=15"',
     'if command -v timeout >/dev/null 2>&1; then __1904_wait="timeout 40"; else __1904_wait=""; fi',
-    'if __1904_said=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true SSH_ASKPASS=true GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes -o ConnectTimeout=15" $__1904_wait git ls-remote --heads origin 2>&1 >/dev/null </dev/null); then',
+    'if __1904_said=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true SSH_ASKPASS=true GIT_SSH_COMMAND="$__1904_ssh" $__1904_wait git fetch --dry-run origin 2>&1 >/dev/null </dev/null); then',
     'echo "The host can read origin without typing anything, so git pull will not stop to ask."',
     'else',
     'echo "CANNOT PULL: the host could not read origin without a password or passphrase. Save git credentials for this user on the host, or give the host a deploy key for the repository."',
@@ -338,6 +349,142 @@ function leadingCdFolder(commands) {
   if (!raw || raw.length > DEPLOY_FOLDER_MAX || !LOG_PATH.test(raw) || raw.includes('..')) return undefined;
   const rest = [...lines.slice(0, index), ...lines.slice(index + 1)].join('\n').replace(/^\n+/, '');
   return { folder: raw, rest };
+}
+
+const SAFE_HOST_HEADER = /^[A-Za-z0-9._:\[\]-]{1,253}$/;
+const SSH_REMOTE = /^(?:ssh:\/\/[A-Za-z0-9._@:/+-]{3,240}|[A-Za-z0-9._-]{1,64}@[A-Za-z0-9._-]{1,128}:[A-Za-z0-9._/@+-]{1,200})$/;
+
+/**
+ * Reads the app folder, sanitized origin URL and whether non-interactive git fetch failed from Dry run output,
+ * so the deploy window can offer inline git sign-in setup right where it failed.
+ */
+function parseDryRunGit(output, fallbackFolder = '') {
+  const text = String(output ?? '');
+  const lines = text.split(/\r?\n/);
+  const folderLine = lines.find(line => line.startsWith('The app folder is there: '));
+  const rawFolder = (folderLine ? folderLine.slice('The app folder is there: '.length).trim() : String(fallbackFolder ?? '').trim()).replace(/(.)\/+$/, '$1');
+  const folder = rawFolder && rawFolder.length <= DEPLOY_FOLDER_MAX && LOG_PATH.test(rawFolder) && !rawFolder.includes('..') ? rawFolder : '';
+  let origin = '';
+  for (const line of lines) {
+    let match;
+    if ((match = /^origin is this app's repository:\s+(\S+)\s*$/.exec(line))) { origin = match[1]; break; }
+    if ((match = /^CHECK: origin is (\S+), but 1904 knows this app's repository as /.exec(line))) { origin = match[1]; break; }
+    if ((match = /^origin:\s+(\S+)\s*$/.exec(line))) { origin = match[1]; break; }
+  }
+  const cannotPull = /^CANNOT PULL:/m.test(text);
+  let scheme = 'other';
+  let httpHost = '';
+  if (/^https?:\/\//i.test(origin)) {
+    try {
+      const parsed = new URL(origin);
+      if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && SAFE_HOST_HEADER.test(parsed.host)) {
+        scheme = 'https';
+        httpHost = parsed.host;
+      }
+    } catch { /* keep 'other' */ }
+  } else if (/^(?:ssh:\/\/|[^/\s@]+@[^/\s:]+:)/i.test(origin)) {
+    scheme = 'ssh';
+  }
+  return { needsAuth: Boolean(cannotPull && folder && origin), folder, origin, scheme, httpHost };
+}
+
+/**
+ * Builds the non-secret remote script and one-time stdin payload to store HTTP(S) git credentials on the host
+ * (in `~/.config/1904-git/credentials`, mode 600, scoped locally to this repo) and verify with `git fetch --dry-run`.
+ * Credentials travel only on SSH stdin, never in argv, env or the script, and are rejected back out if fetch fails.
+ */
+function gitAuthHttpsPlan({ folder, origin, username, token, nonce }) {
+  const fail = error => ({ ok: false, error });
+  if (!NONCE.test(nonce)) return fail('Could not prepare git credential setup.');
+  const cleanFolder = typeof folder === 'string' ? folder.trim().replace(/(.)\/+$/, '$1') : '';
+  if (!cleanFolder || cleanFolder.length > DEPLOY_FOLDER_MAX || !LOG_PATH.test(cleanFolder) || cleanFolder.includes('..')) return fail(FOLDER_ERROR);
+  let parsed;
+  try { parsed = new URL(String(origin ?? '').trim()); } catch { return fail('The repository remote is not an HTTP or HTTPS URL.'); }
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !SAFE_HOST_HEADER.test(parsed.host)) {
+    return fail('The repository remote is not an HTTP or HTTPS URL.');
+  }
+  const user = typeof username === 'string' ? username.trim() : '';
+  if (!user || user.length > 256 || /[\r\n\u0000]/.test(user)) return fail('Enter the git username for this repository.');
+  const secret = typeof token === 'string' ? token : '';
+  if (!secret || secret.length > 1024 || /[\r\n\u0000]/.test(secret)) return fail('Enter a personal access token or password for this repository.');
+  const protocol = parsed.protocol.slice(0, -1);
+  const stdin = `protocol=${protocol}\nhost=${parsed.host}\nusername=${user}\npassword=${secret}\n\n`;
+  const script = [
+    'umask 077',
+    `__1904_dir=${logExpression(cleanFolder)}`,
+    'cd "$__1904_dir" || { echo "NO FOLDER: $__1904_dir" >&2; exit 66; }',
+    '__1904_cred_dir="$HOME/.config/1904-git"',
+    '__1904_cred_file="$__1904_cred_dir/credentials"',
+    'mkdir -p "$__1904_cred_dir" || exit 1',
+    'chmod 700 "$__1904_cred_dir" 2>/dev/null',
+    'touch "$__1904_cred_file" && chmod 600 "$__1904_cred_file"',
+    'git config --local --replace-all credential.helper "" || exit 1',
+    'git config --local --add credential.helper "store --file=$__1904_cred_file" || exit 1',
+    'git credential approve || { echo "Could not store git credentials on the host." >&2; exit 1; }',
+    'chmod 600 "$__1904_cred_file" 2>/dev/null',
+    'if command -v timeout >/dev/null 2>&1; then __1904_wait="timeout 40"; else __1904_wait=""; fi',
+    'if __1904_said=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true SSH_ASKPASS=true $__1904_wait git fetch --dry-run origin 2>&1 </dev/null); then',
+    'echo "Saved git credentials on the host (chmod 600) and verified with git fetch --dry-run."',
+    `echo "__1904_deploy_${nonce}:0"`,
+    'exit 0',
+    'else',
+    `printf 'protocol=%s\\nhost=%s\\n\\n' '${protocol}' '${parsed.host}' | git credential reject 2>/dev/null || true`,
+    `printf '%s\\n' "$__1904_said" | ${HIDE_SIGN_IN} | tail -3 >&2`,
+    `echo "__1904_deploy_${nonce}:1"`,
+    'exit 1',
+    'fi',
+  ].join('\n') + '\n';
+  return { ok: true, script, stdin, word: scriptWordWithStdin(script) };
+}
+
+/**
+ * Builds the remote script that creates (or reuses) a repo-scoped ed25519 SSH deploy key on the host,
+ * configures repo-local `core.sshCommand`, optionally switches `origin` to an SSH URL, prints the public key
+ * with nonce markers, and checks whether `git fetch --dry-run origin` already succeeds.
+ */
+function gitAuthSshPlan({ folder, slug = 'app', remoteUrl = '', nonce }) {
+  const fail = error => ({ ok: false, error });
+  if (!NONCE.test(nonce)) return fail('Could not prepare host deploy key setup.');
+  const cleanFolder = typeof folder === 'string' ? folder.trim().replace(/(.)\/+$/, '$1') : '';
+  if (!cleanFolder || cleanFolder.length > DEPLOY_FOLDER_MAX || !LOG_PATH.test(cleanFolder) || cleanFolder.includes('..')) return fail(FOLDER_ERROR);
+  const cleanSlug = String(slug || 'app').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[.-]+|[.-]+$/g, '').slice(0, 40) || 'app';
+  const sshRemote = typeof remoteUrl === 'string' ? remoteUrl.trim() : '';
+  if (sshRemote && (!SSH_REMOTE.test(sshRemote) || sshRemote.includes('..') || sshRemote.startsWith('-'))) {
+    return fail('Enter a valid SSH repository URL, such as git@github.com:org/repo.git or ssh://git@host:2222/org/repo.git.');
+  }
+  const keyName = `1904-repo-${cleanSlug}`;
+  const script = [
+    'umask 077',
+    `__1904_dir=${logExpression(cleanFolder)}`,
+    'cd "$__1904_dir" || { echo "NO FOLDER: $__1904_dir" >&2; exit 66; }',
+    'if ! command -v ssh-keygen >/dev/null 2>&1; then echo "ssh-keygen is not installed on the host." >&2; exit 1; fi',
+    'mkdir -p "$HOME/.ssh" || exit 1',
+    'chmod 700 "$HOME/.ssh" 2>/dev/null',
+    `__1904_key="$HOME/.ssh/${keyName}"`,
+    `if [ ! -f "$__1904_key" ] || [ ! -f "$__1904_key.pub" ]; then rm -f "$__1904_key" "$__1904_key.pub"; ssh-keygen -q -t ed25519 -N '' -C '1904-repo-${cleanSlug}' -f "$__1904_key" || exit 1; fi`,
+    'chmod 600 "$__1904_key" 2>/dev/null; chmod 644 "$__1904_key.pub" 2>/dev/null',
+    'git config --local core.sshCommand "ssh -i \\"$__1904_key\\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" || exit 1',
+    ...(sshRemote ? [`git remote set-url origin '${sshRemote}' || exit 1`] : []),
+    `echo "__1904_pubkey_${nonce}:$(cat "$__1904_key.pub")"`,
+    'if command -v timeout >/dev/null 2>&1; then __1904_wait="timeout 40"; else __1904_wait=""; fi',
+    'if __1904_said=$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true SSH_ASKPASS=true GIT_SSH_COMMAND="ssh -i \\"$__1904_key\\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15" $__1904_wait git fetch --dry-run origin 2>&1 </dev/null); then',
+    `echo "__1904_fetch_${nonce}:ok"`,
+    'else',
+    `echo "__1904_fetch_${nonce}:needs-key"`,
+    'fi',
+    `echo "__1904_deploy_${nonce}:0"`,
+    'exit 0',
+  ].join('\n') + '\n';
+  return { ok: true, script, word: scriptWord(script) };
+}
+
+/** Parses the validated public key and initial fetch check from `gitAuthSshPlan`'s stdout. */
+function readGitAuthSshOutput(stdout, nonce) {
+  const text = String(stdout ?? '');
+  const pubMatch = new RegExp(`(?:^|\\n)__1904_pubkey_${nonce}:([^\\r\\n]+)`).exec(text);
+  const key = publicKey(pubMatch?.[1] ?? '');
+  const fetchOk = new RegExp(`(?:^|\\n)__1904_fetch_${nonce}:ok(?:\\r?\\n|$)`).test(text);
+  return { publicKey: key || '', fetchOk };
 }
 
 /**
@@ -732,6 +879,6 @@ function recipeView(recipe, pairedId) {
 module.exports = {
   DEPLOYS_PATH, RECIPES_FILE, DEPLOY_CONNECT_MAX, DEPLOY_COMMANDS_MAX, DEPLOY_COMMAND_LINES, DEPLOY_LOG_PATH_MAX, DEPLOY_FOLDER_MAX, DEPLOY_LOG_MODES,
   DEPLOY_LOG_TAIL_BYTES, DEPLOY_TIMEOUT_SECONDS, DEPLOY_WAIT_MAX_MS, DEPLOY_PROMPT_MS, POWERSHELL_STOP, validBranch, DEPLOY_POSITION, DEPLOY_RECIPES_MAX, DEPLOY_FINAL_STATUSES, NO_RECIPE, UNCONFIRMED_RUN,
-  cleanRecipe, recipeHash, recipeText, isRemote, deployScript, preflightScript, leadingCdFolder, deployHint, commandTools, scriptWord, deployPlan, deployEnvironment, readDeployOutput, formatDeployOutput, deployOutcome,
+  cleanRecipe, recipeHash, recipeText, isRemote, deployScript, preflightScript, leadingCdFolder, parseDryRunGit, gitAuthHttpsPlan, gitAuthSshPlan, readGitAuthSshOutput, deployHint, commandTools, scriptWord, scriptWordWithStdin, deployPlan, deployEnvironment, readDeployOutput, formatDeployOutput, deployOutcome,
   validateDeploy, deployRequest, deployUpdate, recipeRegistration, noApprovalPrompt, createDeployRecipes, recipeView, recipeReadiness, suggestCommands,
 };
