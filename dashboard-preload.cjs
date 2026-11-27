@@ -93,6 +93,14 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
       showActivity: () => ipcRenderer.send('1904:computer-activity'),
       // Opens 1904 Desktop's own window for an app's deploy commands. The page cannot read or change them.
       deploys: () => ipcRenderer.send('1904:computer-deploys'),
+      // Pause from Settings. Pausing happens at once; turning it off asks the person in Desktop's own dialog first.
+      setPaused: paused => typeof paused === 'boolean' ? ipcRenderer.invoke('1904:computer-pause', paused) : Promise.resolve(null),
+    },
+    // 1904 Desktop itself, for Settings → 1904 Desktop: its version and whether an update is waiting, and a way to
+    // start the Help menu's update check. Desktop answers that in its own dialog; nothing comes back to the page.
+    app: {
+      info: () => ipcRenderer.invoke('1904:app-info'),
+      checkForUpdates: () => ipcRenderer.send('1904:app-check-updates'),
     },
     // Non-sensitive OS and hardware model only, read by the dashboard only when the person enabled
     // opt-in product usage tracking in Settings → General.

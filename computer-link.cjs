@@ -217,6 +217,20 @@ function connectPrompt(name, person) {
   };
 }
 
+/**
+ * Asked when Pause is turned off from the dashboard's Settings page instead of the 1904 menu. A page may pause this
+ * computer at any moment, since that only takes access away; letting requests in again is the person's answer here.
+ */
+function resumePrompt(name) {
+  return {
+    type: 'question', title: 'Use My Computer',
+    message: `Resume Use My Computer on ${label(name, COMPUTER_NAME_MAX) || 'this computer'}?`,
+    detail: 'Tasks can ask to run commands on this computer again, and deploys from 1904 can start. ' +
+      'Each one still asks you here first, unless you turned on away mode or “Submit without approval” for an app.',
+    buttons: ['Cancel', 'Resume'], defaultId: 0, cancelId: 0, noLink: true,
+  };
+}
+
 /** What the person is told when connecting does not work. */
 const PAIR_NOTICES = {
   unavailable: {
@@ -307,4 +321,4 @@ async function pairComputer({ link, fetch, origin, computer, confirm, notice }) 
   return true;
 }
 
-module.exports = { LINK_FILE, FOLDERS_FILE, SETTINGS_FILE, PAIR_PATH, PAIR_NOTICES, connectPrompt, createComputerLink, pairComputer };
+module.exports = { LINK_FILE, FOLDERS_FILE, SETTINGS_FILE, PAIR_PATH, PAIR_NOTICES, connectPrompt, resumePrompt, createComputerLink, pairComputer };

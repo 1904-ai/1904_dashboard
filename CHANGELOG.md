@@ -12,6 +12,7 @@
 - **Run now** starts an app’s saved commands from the window, once the form shows exactly what is saved. Every deploy shows in Computer Activity with its output and a Stop button.
 - A deploy prompt nobody answers closes after 30 minutes, so it never holds other prompts for hours.
 - Pause stops deploys from 1904 too, and Disconnect turns “Submit without approval” off for every app.
+- **Settings → 1904 Desktop**: in 1904 Desktop, the dashboard’s Settings (the gear) now has a page for this computer: connect it, pause and resume, open Computer Activity and Deploy From This Computer, choose the task browser, and see the version or check for updates. The page can pause at once; turning Pause off asks you in a 1904 Desktop dialog first. The 1904 menu keeps the same commands, so Pause and Disconnect still work when the dashboard cannot load.
 
 ## 0.4.0
 
