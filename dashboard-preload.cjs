@@ -87,12 +87,15 @@ if (process.isMainFrame && window.location.origin === 'https://1904.ai') {
     computer: {
       state: () => ipcRenderer.invoke('1904:computer-state'),
       connect: () => ipcRenderer.invoke('1904:computer-connect'),
+      disconnect: () => ipcRenderer.invoke('1904:computer-disconnect'),
       away: task => ipcRenderer.invoke('1904:computer-away', {
         taskId: task?.taskId, appId: task?.appId, taskTitle: task?.taskTitle,
       }),
       showActivity: () => ipcRenderer.send('1904:computer-activity'),
       // Opens 1904 Desktop's own window for an app's deploy commands. The page cannot read or change them.
-      deploys: () => ipcRenderer.send('1904:computer-deploys'),
+      deploys: appId => ipcRenderer.send('1904:computer-deploys', typeof appId === 'string' ? appId : undefined),
+      // Non-secret list of apps configured to deploy from this computer (never commands, host, or secrets).
+      deployRecipes: () => ipcRenderer.invoke('1904:computer-deploy-recipes'),
       // Pause from Settings. Pausing happens at once; turning it off asks the person in Desktop's own dialog first.
       setPaused: paused => typeof paused === 'boolean' ? ipcRenderer.invoke('1904:computer-pause', paused) : Promise.resolve(null),
     },

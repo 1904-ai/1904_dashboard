@@ -175,7 +175,7 @@ test('with “Submit without approval” on for the app, it runs without a promp
   t.children[0].stdout.write(hostOutput('oops\n', 2));
   t.children[0].finish(2);
   await flush();
-  assert.deepEqual([t.deployCalls[1].status, t.deployCalls[1].exitCode, t.deployCalls[1].message], ['failed', 2, 'The commands ended with exit code 2.']);
+  assert.deepEqual([t.deployCalls[1].status, t.deployCalls[1].exitCode, t.deployCalls[1].message], ['failed', 2, 'The commands ended with exit code 2: oops']);
   assert.equal(t.run(sent.id).approval, 'deploy-auto');
   assert.deepEqual(t.notices.map(notice => notice.kind), ['deploy-run', 'deploy-finished']);
 });
@@ -434,4 +434,33 @@ test('a dry run checks the commands on the host, runs none and is not the app’
   assert.deepEqual([notice.status, notice.output], ['done', 'Connected as deploy on realzy.\nThe commands parse.\n']);
   assert.equal(t.store.get('app_realzy', PAIRED).lastRun, undefined);
   assert.deepEqual([t.run(started.id).approval, t.run(started.id).task.title], ['dry-run', 'Dry run for Realzy']);
+});
+
+test('failed dry runs and Run now deploys capture stderr and clear SSH/command error messages on the notice', async () => {
+  const t = setup({ recipes: { app_realzy: onHost('key', { noApproval: false }) }, secrets: { app_realzy: { privateKey: 'KEY PRIVATE KEY' } } });
+  const dry = t.bridge.runDeployNow('app_realzy', { dryRun: true });
+  assert.equal(dry.ok, true);
+  await flush();
+  t.children[0].stderr.write('Permission denied (publickey).\n');
+  t.children[0].finish(255);
+  await flush();
+  const dryNotice = t.notices.find(entry => entry.kind === 'dry-run-finished');
+  assert.equal(dryNotice.status, 'failed');
+  assert.equal(dryNotice.exitCode, 255);
+  assert.match(dryNotice.stderr, /Permission denied/);
+  assert.match(dryNotice.message, /refused to sign in/i);
+
+  const run = t.bridge.runDeployNow('app_realzy');
+  assert.equal(run.ok, true);
+  await flush();
+  t.children[1].stdout.write(hostOutput('Pulling code...\n', 128));
+  t.children[1].stderr.write('fatal: could not read from remote repository.\n');
+  t.children[1].finish(128);
+  await flush();
+  const runNotice = t.notices.find(entry => entry.kind === 'deploy-finished');
+  assert.equal(runNotice.status, 'failed');
+  assert.equal(runNotice.exitCode, 128);
+  assert.match(runNotice.stderr, /could not read from remote repository/);
+  assert.match(runNotice.message, /exit code 128: fatal: could not read from remote repository/);
+  assert.match(t.store.get('app_realzy', PAIRED).lastRun.message, /could not read from remote repository/);
 });

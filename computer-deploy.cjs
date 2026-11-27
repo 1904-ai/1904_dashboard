@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { COMPUTER_STDOUT_MAX, computerId, label, visibleLine, visibleText } = require('./computer-policy.cjs');
 const { promptFits } = require('./computer-approval.cjs');
-const { cleanHost, fingerprint, hostText } = require('./computer-deploy-ssh.cjs');
+const { cleanHost, fingerprint, hostText, sshProblem } = require('./computer-deploy-ssh.cjs');
 
 const DEPLOYS_PATH = '/api/desktop/computer/deploys';
 const RECIPES_FILE = 'computer-deploys.json';
@@ -53,7 +53,7 @@ const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 const FOLDER_ERROR = 'Name the app folder as a full path on the host, such as /srv/my-app or ~/my-app, without spaces or quotes.';
 const appKey = key => typeof key === 'string' && REF.test(key) && !['__proto__', 'constructor', 'prototype'].includes(key);
 
-const NO_RECIPE = 'This computer has no deploy commands saved for this app. Choose Deploy From This Computer in 1904 Desktop’s 1904 menu.';
+const NO_RECIPE = 'This computer has no deploy commands saved for this app. Open Settings → Computers → Local deploys in 1904 Desktop.';
 const UNCONFIRMED_RUN = 'The commands did not report back from the host, so this deploy is not counted as done. Check that sh and base64 are available there.';
 
 /**
@@ -395,20 +395,64 @@ function readDeployOutput(stdout, nonce) {
   return { confirmed: Boolean(done), ...(done ? { status: Number(done[2]) } : {}), ...(log !== undefined ? { log } : {}), output };
 }
 
+/** Last meaningful error line from stderr or output, bounded for inline summaries. */
+function lastErrorLine(text) {
+  const lines = String(text ?? '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const cleaned = label(lines[index], 240);
+    if (cleaned) return cleaned;
+  }
+  return '';
+}
+
+/** Combines stdout, stderr, log, and any failure summary so a user always sees why a deploy or dry run failed. */
+function formatDeployOutput({ output = '', stderr = '', log = '', message = '', exitCode = null, status = '' } = {}) {
+  const sections = [];
+  const out = String(output ?? '').trimEnd();
+  const err = String(stderr ?? '').trimEnd();
+  const logText = String(log ?? '').trimEnd();
+  if (out) sections.push(out);
+  if (err) sections.push(`[error output]\n${err}`);
+  if (logText) sections.push(`[log]\n${logText}`);
+  if (!sections.length) {
+    const parts = [];
+    if (message) parts.push(String(message));
+    else if (status && status !== 'done') parts.push(`Ended with status: ${status}`);
+    if (Number.isInteger(exitCode) && exitCode !== 0 && !parts.some(text => text.includes(`exit code ${exitCode}`))) {
+      parts.push(`Exit code ${exitCode}.`);
+    }
+    if (parts.length) sections.push(parts.join(' '));
+  }
+  return sections.join('\n\n');
+}
+
 /** How a finished run counts: `done` only when the commands ended with 0 and, where the script reports, it said so. */
-function deployOutcome({ outcome, marker, nonce }) {
+function deployOutcome({ outcome, marker, nonce, host }) {
+  const stderr = String(outcome.stderr ?? '');
   const read = marker ? readDeployOutput(outcome.stdout, nonce) : { confirmed: true, output: String(outcome.stdout ?? '') };
-  if (outcome.status !== 'done') return { ...read, status: outcome.status, exitCode: outcome.exitCode ?? null, message: outcome.message };
-  if (outcome.exitCode === 0 && !read.confirmed) return { ...read, status: 'failed', exitCode: null, message: UNCONFIRMED_RUN };
+  if (outcome.status !== 'done') return { ...read, stderr, status: outcome.status, exitCode: outcome.exitCode ?? null, message: outcome.message };
+  if (outcome.exitCode === 0 && !read.confirmed) return { ...read, stderr, status: 'failed', exitCode: null, message: UNCONFIRMED_RUN };
   // The commands' own exit status where the script reported it; otherwise whatever ended the connection.
   const code = read.confirmed && Number.isSafeInteger(read.status) ? read.status : outcome.exitCode;
-  if (code === 0 && outcome.exitCode === 0) return { ...read, status: 'done', exitCode: 0 };
+  if (code === 0 && outcome.exitCode === 0) return { ...read, stderr, status: 'done', exitCode: 0 };
   // The commands reported 0 but the connection itself ended badly: the connection's code is the one that failed.
   const failedCode = code === 0 ? outcome.exitCode : code;
+  let message = outcome.message;
+  if (!message) {
+    if (!read.confirmed && host && stderr.trim()) {
+      message = sshProblem(stderr, { password: host.auth === 'password-saved' || host.auth === 'password-ask' });
+    } else if (read.confirmed && code !== 0) {
+      const detail = lastErrorLine(stderr) || lastErrorLine(read.output);
+      message = detail ? `The commands ended with exit code ${code}: ${detail}` : `The commands ended with exit code ${code}.`;
+    } else {
+      const detail = lastErrorLine(stderr) || lastErrorLine(read.output);
+      const base = `Could not run the commands${marker ? ' on the host' : ''} (exit code ${outcome.exitCode ?? 'unknown'}).`;
+      message = detail ? `${base} ${detail}` : base;
+    }
+  }
   return {
-    ...read, status: 'failed', exitCode: Number.isSafeInteger(failedCode) ? failedCode : null,
-    message: outcome.message || (read.confirmed && code !== 0 ? `The commands ended with exit code ${code}.`
-      : `Could not run the commands${marker ? ' on the host' : ''} (exit code ${outcome.exitCode ?? 'unknown'}).`),
+    ...read, stderr, status: 'failed', exitCode: Number.isSafeInteger(failedCode) ? failedCode : null,
+    message: label(message, 360) || `The commands ended with exit code ${failedCode ?? 'unknown'}.`,
   };
 }
 
@@ -510,7 +554,9 @@ function storedRecipe(appId, value) {
   const ranWith = entry => typeof entry.hash === 'string' && /^[a-f0-9]{64}$/.test(entry.hash) ? { hash: entry.hash } : {};
   const lastRun = value.lastRun && typeof value.lastRun === 'object' && Number.isFinite(value.lastRun.at) ? {
     at: value.lastRun.at, status: label(String(value.lastRun.status ?? ''), 20) || '', sha: SHA.test(value.lastRun.sha) ? value.lastRun.sha : '',
-    exitCode: Number.isSafeInteger(value.lastRun.exitCode) ? value.lastRun.exitCode : null, ...ranWith(value.lastRun),
+    exitCode: Number.isSafeInteger(value.lastRun.exitCode) ? value.lastRun.exitCode : null,
+    ...(label(String(value.lastRun.message ?? ''), 300) ? { message: label(String(value.lastRun.message ?? ''), 300) } : {}),
+    ...ranWith(value.lastRun),
   } : undefined;
   const lastCheck = value.lastCheck && typeof value.lastCheck === 'object' && Number.isFinite(value.lastCheck.at)
     ? { at: value.lastCheck.at, ok: value.lastCheck.ok === true, ...ranWith(value.lastCheck) } : undefined;
@@ -579,7 +625,12 @@ function createDeployRecipes({ file, now = Date.now }) {
       load();
       const recipe = recipes.get(appId);
       if (!recipe) return;
-      recipe.lastRun = { at: now(), status: String(run.status ?? ''), sha: SHA.test(run.sha) ? run.sha : '', exitCode: Number.isSafeInteger(run.exitCode) ? run.exitCode : null, hash: recipe.hash };
+      const message = label(String(run.message ?? ''), 300);
+      recipe.lastRun = {
+        at: now(), status: String(run.status ?? ''), sha: SHA.test(run.sha) ? run.sha : '',
+        exitCode: Number.isSafeInteger(run.exitCode) ? run.exitCode : null,
+        ...(message ? { message } : {}), hash: recipe.hash,
+      };
       try { save(); } catch { /* a record, never a reason to fail a deploy */ }
     },
     /** Whether the last dry run of an app's recipe found nothing that would stop a deploy. */
@@ -628,6 +679,6 @@ function recipeView(recipe, pairedId) {
 module.exports = {
   DEPLOYS_PATH, RECIPES_FILE, DEPLOY_CONNECT_MAX, DEPLOY_COMMANDS_MAX, DEPLOY_COMMAND_LINES, DEPLOY_LOG_PATH_MAX, DEPLOY_FOLDER_MAX, DEPLOY_LOG_MODES,
   DEPLOY_LOG_TAIL_BYTES, DEPLOY_TIMEOUT_SECONDS, DEPLOY_WAIT_MAX_MS, DEPLOY_PROMPT_MS, POWERSHELL_STOP, validBranch, DEPLOY_POSITION, DEPLOY_RECIPES_MAX, DEPLOY_FINAL_STATUSES, NO_RECIPE, UNCONFIRMED_RUN,
-  cleanRecipe, recipeHash, recipeText, isRemote, deployScript, preflightScript, commandTools, scriptWord, deployPlan, deployEnvironment, readDeployOutput, deployOutcome,
+  cleanRecipe, recipeHash, recipeText, isRemote, deployScript, preflightScript, commandTools, scriptWord, deployPlan, deployEnvironment, readDeployOutput, formatDeployOutput, deployOutcome,
   validateDeploy, deployRequest, deployUpdate, recipeRegistration, noApprovalPrompt, createDeployRecipes, recipeView, recipeReadiness, suggestCommands,
 };

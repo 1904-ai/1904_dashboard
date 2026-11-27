@@ -50,9 +50,9 @@ const HISTORY_SHOWN = 100;
 const ACTIVITY_OUTPUT_MAX = 64 * 1024;
 
 const CONNECTION_TEXT = {
-  'not-connected': () => 'This computer isn’t connected to 1904. Choose Use My Computer… in the 1904 menu to connect it.',
-  revoked: () => 'This computer was disconnected from 1904. Choose Use My Computer… in the 1904 menu to connect it again.',
-  lapsed: () => 'This computer’s connection to 1904 lapsed after 30 days without use. Choose Use My Computer… in the 1904 menu to connect it again.',
+  'not-connected': () => 'This computer isn’t connected to 1904. Open Settings → Computers to connect it.',
+  revoked: () => 'This computer was disconnected from 1904. Open Settings → Computers to connect it again.',
+  lapsed: () => 'This computer’s connection to 1904 lapsed after 30 days without use. Open Settings → Computers to connect it again.',
   connecting: () => 'Connecting to 1904…',
   connected: name => `Connected to 1904 as ${name}. Nothing runs until you approve it on this computer or start away mode.`,
   offline: () => 'Can’t reach 1904. Trying again automatically.',
@@ -60,8 +60,8 @@ const CONNECTION_TEXT = {
   disabled: () => 'Use My Computer is turned off for your workspace.',
   blocked: () => '1904 isn’t sending commands to this computer for your account right now. Trying again every few minutes.',
   sleeping: () => 'Paused while this computer sleeps.',
-  paused: () => 'Use My Computer is paused on this computer. Choose Resume Use My Computer in the 1904 menu to take requests again.',
-  unreadable: () => 'This computer’s 1904 key could not be read. Choose Disconnect This Computer in the 1904 menu, then connect it again.',
+  paused: () => 'Use My Computer is paused on this computer. Turn off Pause in Settings → Computers to take requests again.',
+  unreadable: () => 'This computer’s 1904 key could not be read. Disconnect this computer in Settings → Computers, then connect it again.',
   disconnecting: () => 'Disconnecting…',
 };
 
@@ -608,8 +608,9 @@ function createComputerBridge({
   /** Ends a deploy that never ran, here and (unless the person started it here) on 1904. */
   function endDeploy(request, entry, status, message, { retry = active } = {}) {
     close(entry, status, { message });
-    // A dry run that could not even start still answers the window that is waiting for it.
-    if (request.dryRun) onNotice({ kind: 'dry-run-finished', request, status: 'failed', output: message });
+    // A dry run or local test deploy that could not even start still answers the window that is waiting for it.
+    if (request.dryRun) onNotice({ kind: 'dry-run-finished', request, status: 'failed', exitCode: null, message, output: message, stderr: '' });
+    else if (request.local) onNotice({ kind: 'deploy-finished', request, status, exitCode: null, message, output: '', stderr: '' });
     if (request.local) return Promise.resolve(true);
     // 1904 hears at once, so the next deploy is not held behind one that will never run. `expired` is its own word for
     // its own deadline; a prompt nobody answered here goes back as cancelled.
@@ -718,16 +719,25 @@ function createComputerBridge({
       }
       const outcome = await started.done;
       handles.delete(request.id);
-      const result = deployPolicy.deployOutcome({ outcome, marker: built.marker, nonce: runNonce });
+      const result = deployPolicy.deployOutcome({ outcome, marker: built.marker, nonce: runNonce, host: recipe.host });
       // Computer Activity keeps how the commands themselves ended; 1904 hears whether the deploy counts as done.
       close(entry, outcome.status, { exitCode: result.exitCode, message: result.message, durationMs: outcome.durationMs });
       // A dry run deployed nothing, so it is not the app's last deploy.
       // What it found is kept beside the recipe instead, for the window's checklist.
       try {
         if (request.dryRun) deploys.noteCheck?.(request.app.id, { ok: result.status === 'done' });
-        else deploys.noteRun(request.app.id, { status: result.status, sha: request.sha, exitCode: result.exitCode });
+        else deploys.noteRun(request.app.id, { status: result.status, sha: request.sha, exitCode: result.exitCode, message: result.message });
       } catch { /* a record only */ }
-      onNotice({ kind: request.dryRun ? 'dry-run-finished' : 'deploy-finished', request, status: result.status, exitCode: result.exitCode, output: request.dryRun ? result.output : undefined });
+      onNotice({
+        kind: request.dryRun ? 'dry-run-finished' : 'deploy-finished',
+        request,
+        status: result.status,
+        exitCode: result.exitCode,
+        message: result.message,
+        output: result.output,
+        stderr: outcome.stderr,
+        ...(result.log !== undefined ? { log: result.log } : {}),
+      });
       if (!request.local) {
         await reportDeploy(deployPolicy.deployUpdate({
           deployId: request.id, status: result.status, exitCode: result.exitCode, output: result.output, stderr: outcome.stderr,
