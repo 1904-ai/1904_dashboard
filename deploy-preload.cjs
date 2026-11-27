@@ -89,6 +89,7 @@ function resetCopyNotice() {
 function clearBoxFeedback() {
   setFeedback('identity-feedback');
   setFeedback('key-feedback');
+  setFeedback('run-feedback');
   resetCopyNotice();
 }
 
@@ -280,7 +281,7 @@ function setupSteps(recipe, changed) {
         : { state: 'todo', name: 'Check it on the host', text: 'Choose Dry run: it looks at the folder, git, the repository and your tools, and runs none of your commands.' });
   const test = recipe.ready?.tested ?? 'todo';
   steps.push(test === 'ok' ? { state: 'ok', name: 'Deploy tested', text: `These commands ran to the end, ${when(recipe.lastRun.at)}.` }
-    : test === 'problem' ? { state: 'problem', name: 'The last deploy did not finish', text: `${lastRunResult(recipe)}. Computer Activity has the output. Fix it, then choose Run now.` }
+    : test === 'problem' ? { state: 'problem', name: 'The last deploy did not finish', text: `${lastRunResult(recipe)}${recipe.lastRun?.message ? ` — ${recipe.lastRun.message}` : ''}. Computer Activity keeps the full output. Fix it, then choose Run now.` }
       : { state: 'todo', name: 'Test a deploy', text: 'Choose Run now once: it pulls and builds for real, so you know it works before a merge relies on it.' });
   steps.push({
     state: recipe.auto ? (check === 'ok' && test === 'ok' ? 'ok' : 'todo') : 'todo',
@@ -337,6 +338,8 @@ function render() {
   const apps = new Map(state.apps.map(app => [app.id, app.name]));
   for (const recipe of state.recipes) if (!apps.has(recipe.appId)) apps.set(recipe.appId, recipe.appName);
   const select = $('app');
+  const requested = state.selectedAppId && apps.has(state.selectedAppId) ? state.selectedAppId : undefined;
+  if (state.selectedAppId) delete state.selectedAppId;
   const previous = selected && apps.has(selected) ? selected : undefined;
   select.replaceChildren(...[...apps].map(([id, name]) => {
     const option = node('option', '', recipeFor(id) ? `${name} (saved)` : name);
@@ -344,9 +347,9 @@ function render() {
     return option;
   }));
   $('apps-empty').hidden = apps.size > 0;
-  const next = previous ?? state.recipes[0]?.appId ?? [...apps.keys()][0];
+  const next = requested ?? previous ?? state.recipes[0]?.appId ?? [...apps.keys()][0];
   if (next) select.value = next;
-  if (next !== selected || !previous) fill(next);
+  if (next !== selected || !previous || requested) fill(next);
   else showParts();
   const ordered = [...state.recipes].sort((a, b) => a.position - b.position || a.appName.localeCompare(b.appName));
   $('saved-empty').hidden = ordered.length > 0;
@@ -547,15 +550,51 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   $('dry-run').addEventListener('click', async () => {
     $('dry-output').hidden = true;
+    $('dry-output').textContent = '';
     suggested = undefined;
     showSuggestion();
+    say('');
+    setFeedback('run-feedback', {
+      kind: 'pending',
+      title: 'Running dry run…',
+      detail: 'Checking the connection, folder, git, and commands on the host without running your commands.',
+    });
     const answer = await act('dry-run', '1904:deploy-dry-run', selected);
-    if (answer) say(answer.ok ? 'Checking on the host. Nothing is being run…' : answer.error || 'Could not start.', answer.ok ? '' : 'error');
+    if (!answer) return;
+    if (!answer.ok) {
+      setFeedback('run-feedback', {
+        kind: 'error',
+        title: 'Dry run could not start',
+        detail: answer.error || 'Could not start.',
+      });
+      say(answer.error || 'Could not start.', 'error');
+    } else {
+      say('Checking on the host. Nothing is being run…');
+    }
   });
   $('run').addEventListener('click', async () => {
+    $('dry-output').hidden = true;
+    $('dry-output').textContent = '';
+    suggested = undefined;
+    showSuggestion();
+    say('');
+    setFeedback('run-feedback', {
+      kind: 'pending',
+      title: 'Running deploy…',
+      detail: 'Output and any error messages will appear here when it finishes. Computer Activity also shows live output.',
+    });
     const answer = await act('run', '1904:deploy-run', selected);
     if (!answer) return;
-    say(answer.ok ? 'Started. Computer Activity shows it running.' : answer.error || 'Could not start.', answer.ok ? 'ok' : 'error');
+    if (!answer.ok) {
+      setFeedback('run-feedback', {
+        kind: 'error',
+        title: 'Deploy could not start',
+        detail: answer.error || 'Could not start.',
+      });
+      say(answer.error || 'Could not start.', 'error');
+    } else {
+      say('Started. Computer Activity shows it running.', 'ok');
+    }
   });
   $('remove').addEventListener('click', async () => {
     const answer = await act('remove', '1904:deploy-remove', selected);
@@ -574,14 +613,51 @@ ipcRenderer.on('1904:deploy-state', (_event, next) => {
   state = next;
   render();
 });
+ipcRenderer.on('1904:deploy-select', (_event, appId) => {
+  if (typeof appId !== 'string' || !appId) return;
+  const known = state.apps.some(app => app.id === appId) || state.recipes.some(recipe => recipe.appId === appId);
+  if (!known) {
+    state.selectedAppId = appId;
+    return;
+  }
+  $('app').value = appId;
+  say('');
+  fill(appId);
+});
 ipcRenderer.on('1904:deploy-dry-run-result', (_event, result) => {
   if (!result || result.appId !== selected) return;
-  $('dry-output').textContent = result.output || 'The host said nothing.';
+  const output = result.output || result.message || 'The host returned no output.';
+  $('dry-output').setAttribute('aria-label', 'What the dry run found');
+  $('dry-output').textContent = output;
   $('dry-output').hidden = false;
   // Only fixed lines the main process chose from what the folder holds: text, never markup, and never added without a click.
   suggested = result.suggested && Array.isArray(result.suggested.lines) ? result.suggested : undefined;
   showSuggestion();
-  say(result.ok ? 'Dry run: nothing found that would stop a deploy.' : 'Dry run: something would stop a deploy. See below.', result.ok ? 'ok' : 'error');
+  setFeedback('run-feedback', result.ok
+    ? { kind: 'ok', title: 'Dry run passed', detail: 'Nothing found that would stop a deploy. No command was run.' }
+    : {
+      kind: 'error',
+      title: Number.isInteger(result.exitCode) && result.exitCode !== 0 ? `Dry run failed (exit code ${result.exitCode})` : 'Dry run failed',
+      detail: result.message || 'See the captured output and errors below.',
+    });
+  say(result.ok ? 'Dry run: nothing found that would stop a deploy.' : (result.message || 'Dry run: something would stop a deploy. See below.'), result.ok ? 'ok' : 'error');
+});
+ipcRenderer.on('1904:deploy-run-result', (_event, result) => {
+  if (!result || result.appId !== selected) return;
+  const output = result.output || result.message || '';
+  $('dry-output').setAttribute('aria-label', 'Deploy output and errors');
+  $('dry-output').textContent = output || (result.ok ? 'The commands finished with no output.' : 'No error output was returned.');
+  $('dry-output').hidden = false;
+  const statusLabel = { done: 'Deploy finished', failed: 'Deploy failed', timeout: 'Deploy timed out', cancelled: 'Deploy stopped', declined: 'Deploy declined' }[result.status] || (result.ok ? 'Deploy finished' : 'Deploy did not finish');
+  const codeSuffix = !result.ok && Number.isInteger(result.exitCode) && result.exitCode !== 0 ? ` (exit code ${result.exitCode})` : '';
+  setFeedback('run-feedback', result.ok
+    ? { kind: 'ok', title: 'Deploy finished', detail: 'The deploy commands ran to the end.' }
+    : {
+      kind: 'error',
+      title: `${statusLabel}${codeSuffix}`,
+      detail: result.message || 'See the captured output and error messages below.',
+    });
+  say(result.ok ? 'Deploy finished.' : (result.message || `${statusLabel}${codeSuffix}. See output below.`), result.ok ? 'ok' : 'error');
 });
 ipcRenderer.on('1904:deploy-theme', (_event, theme) => {
   document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';

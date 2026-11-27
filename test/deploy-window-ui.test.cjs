@@ -173,6 +173,9 @@ function loadDeployWindow({ state, onInvoke, onSend = () => {} } = {}) {
     invoked,
     timers,
     flush,
+    emit(channel, ...args) {
+      ipcListeners.get(channel)?.({}, ...args);
+    },
     runTimers() {
       for (const [id, entry] of [...timers.entries()]) {
         timers.delete(id);
@@ -214,12 +217,12 @@ function baseState({ trusted = true } = {}) {
 }
 
 test('Deploy From This Computer opens wider and uses a wider content measure', () => {
-  const winMatch = /function showDeploys\(\)[\s\S]*?new BrowserWindow\(\{([\s\S]*?)\}\);/.exec(mainSource);
+  const winMatch = /function showDeploys\([^)]*\)[\s\S]*?new BrowserWindow\(\{([\s\S]*?)\}\);/.exec(mainSource);
   assert.ok(winMatch, 'showDeploys BrowserWindow declaration exists');
   const width = Number(/\bwidth:\s*(\d+)/.exec(winMatch[1])?.[1]);
-  assert.ok(width >= 860, `expected wider default deploy window width (>= 860), got ${width}`);
+  assert.ok(width >= 1100, `expected wider default deploy window width (>= 1100), got ${width}`);
   const mainMaxWidth = Number(/main\s*\{[^}]*max-width:\s*(\d+)px/.exec(html)?.[1]);
-  assert.ok(mainMaxWidth >= 900, `expected wider deploy main max-width (>= 900px), got ${mainMaxWidth}`);
+  assert.ok(mainMaxWidth >= 1100, `expected wider deploy main max-width (>= 1100px), got ${mainMaxWidth}`);
   assert.doesNotMatch(preloadSource, /innerHTML/, 'deploy-preload never parses untrusted text as HTML');
 });
 
@@ -312,4 +315,60 @@ test('Deploy key card explains when Host identity must be trusted first and conf
   ui.runTimers();
   assert.equal(ui.$('copy-install').textContent, 'Copy the command');
   assert.equal(ui.$('copy-install').dataset.copied, undefined);
+});
+
+test('Run now and Dry run display captured error messages and stderr inline in the deploy window', async () => {
+  const ui = loadDeployWindow({
+    state: baseState({ trusted: true }),
+    async onInvoke() { return { ok: true }; },
+  });
+  await ui.flush();
+
+  ui.$('run').click();
+  await ui.flush();
+  assert.equal(ui.$('run-feedback').hidden, false);
+  assert.equal(ui.$('run-feedback').dataset.kind, 'pending');
+
+  ui.emit('1904:deploy-run-result', {
+    appId: 'app_openls',
+    ok: false,
+    status: 'failed',
+    exitCode: 128,
+    message: 'The commands ended with exit code 128: fatal: not a git repository',
+    output: 'Starting deploy\n\n[error output]\nfatal: not a git repository',
+  });
+  assert.equal(ui.$('run-feedback').dataset.kind, 'error');
+  assert.equal(ui.$('run-feedback').getAttribute('role'), 'alert');
+  assert.equal(ui.$('run-feedback-title').textContent, 'Deploy failed (exit code 128)');
+  assert.match(ui.$('run-feedback-detail').textContent, /fatal: not a git repository/);
+  assert.equal(ui.$('dry-output').hidden, false);
+  assert.match(ui.$('dry-output').textContent, /\[error output\]\nfatal: not a git repository/);
+
+  ui.$('dry-run').click();
+  await ui.flush();
+  ui.emit('1904:deploy-dry-run-result', {
+    appId: 'app_openls',
+    ok: false,
+    status: 'failed',
+    exitCode: 255,
+    message: 'The host refused to sign in. Check the user name and that the key is installed there.',
+    output: '[error output]\nPermission denied (publickey).',
+  });
+  assert.equal(ui.$('run-feedback').dataset.kind, 'error');
+  assert.equal(ui.$('run-feedback-title').textContent, 'Dry run failed (exit code 255)');
+  assert.match(ui.$('run-feedback-detail').textContent, /host refused to sign in/);
+  assert.match(ui.$('dry-output').textContent, /Permission denied \(publickey\)/);
+});
+
+test('Deploy window pre-selects a requested app from initial state or 1904:deploy-select', async () => {
+  const base = baseState({ trusted: true });
+  base.apps.push({ id: 'app_realzy', name: 'Realzy' });
+  base.selectedAppId = 'app_realzy';
+  const ui = loadDeployWindow({ state: base, async onInvoke() { return { ok: true }; } });
+  await ui.flush();
+  assert.equal(ui.$('app').value, 'app_realzy');
+
+  ui.emit('1904:deploy-select', 'app_openls');
+  assert.equal(ui.$('app').value, 'app_openls');
+  assert.equal(ui.$('host-name').value, 'openls.internal');
 });

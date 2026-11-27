@@ -15,10 +15,11 @@
       --focus: #0b62d6; --info-bg: #0b62d610; --info-edge: #0b62d645; }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--canvas); color: var(--text); font: 400 13px/1.45 system-ui, sans-serif; }
-    header { position: sticky; top: 0; z-index: 1; padding: 14px 24px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
+    header { position: sticky; top: 0; z-index: 1; padding: 14px 28px 12px; background: var(--canvas); border-bottom: 1px solid var(--line); }
+    .header-inner { max-width: 1200px; margin: 0 auto; }
     h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
     #connection { margin: 4px 0 0; color: var(--muted); }
-    main { padding: 4px 24px 28px; max-width: 960px; }
+    main { width: 100%; padding: 8px 28px 32px; max-width: 1200px; margin: 0 auto; }
     h2 { margin: 18px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
     .hint { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
     [hidden] { display: none !important; }
@@ -29,17 +30,17 @@
     .box input[type="password"], .box input[type="text"] { background: var(--field); }
     select { font: inherit; }
     input[type="number"] { width: 76px; }
-    textarea { min-height: 150px; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4; }
+    textarea { min-height: 170px; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 4; }
     fieldset { margin: 14px 0 0; padding: 0; border: 0; min-width: 0; }
     .choice { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; align-items: start; margin: 6px 0 0; }
     .choice input { margin: 3px 0 0; }
     .choice .hint { grid-column: 2; margin: 0; }
     .choice:has(> input:disabled) { opacity: .6; }
-    .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-    .row .field { flex: 0 1 200px; }
-    .row .grow { flex: 1 1 260px; min-width: 0; }
+    .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+    .row .field { flex: 1 1 240px; }
+    .row .grow { flex: 2 1 360px; min-width: 0; }
     .row button { flex: none; }
-    .row .narrow { flex: 0 0 88px; }
+    .row .narrow { flex: 0 0 104px; }
     .row .narrow input { width: 100%; }
     .inline-row { display: flex; gap: 8px; align-items: stretch; }
     .inline-row input { flex: 1 1 auto; min-width: 0; }
@@ -74,8 +75,8 @@
       .icon-spin { animation: spin .9s linear infinite; }
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    pre { margin: 8px 0 0; padding: 9px 11px; border-radius: 6px; background: var(--code); border: 1px solid var(--line);
-      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; }
+    pre { margin: 8px 0 0; padding: 10px 12px; border-radius: 6px; background: var(--code); border: 1px solid var(--line);
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
     .steps { list-style: none; margin: 12px 0 0; padding: 4px 12px; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
     .steps li { display: grid; grid-template-columns: 18px 1fr; gap: 0 8px; align-items: baseline; padding: 6px 0; }
     .steps li + li { border-top: 1px solid var(--line); }
@@ -115,8 +116,10 @@
 </head>
 <body>
   <header>
-    <h1>Deploy From This Computer</h1>
-    <p id="connection" role="status"></p>
+    <div class="header-inner">
+      <h1>Deploy From This Computer</h1>
+      <p id="connection" role="status"></p>
+    </div>
   </header>
   <main>
     <p class="hint">Save the commands you use to deploy an app. When a change of yours to that app merges, 1904 asks this computer to run them.
@@ -277,7 +280,16 @@
         <button type="button" id="remove">Remove</button>
       </div>
       <p id="status" role="status" aria-live="polite"></p>
-      <pre id="dry-output" hidden tabindex="0" aria-label="What the dry run found"></pre>
+      <div class="feedback" id="run-feedback" hidden role="status" aria-live="polite">
+        <svg class="fb-icon fb-pending icon-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke-opacity=".28"/><path d="M13.5 8A5.5 5.5 0 0 0 8 2.5"/></svg>
+        <svg class="fb-icon fb-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
+        <svg class="fb-icon fb-error" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.4"/><circle cx="8" cy="11.1" r=".6" fill="currentColor" stroke="none"/></svg>
+        <div class="feedback-body">
+          <span class="feedback-title" id="run-feedback-title"></span>
+          <span class="feedback-detail" id="run-feedback-detail" hidden></span>
+        </div>
+      </div>
+      <pre id="dry-output" hidden tabindex="0" aria-label="Deploy and dry run output"></pre>
       <div class="box" id="suggest-box" hidden>
         <span class="box-title">Suggested commands</span>
         <p class="hint" id="suggest-text"></p>

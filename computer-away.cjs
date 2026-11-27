@@ -20,7 +20,7 @@ function awayDurationPrompt(taskTitle) {
     detail: 'For the time you choose, this task’s agent can run commands on this computer without asking, for messages you send ' +
       'from a browser or a phone. Every command runs in the sandbox: it can change files only in the app’s folder and can’t read your keys ' +
       'or personal folders. Messages you send from this window still ask, and a command that needs full access still waits for you here. ' +
-      'Each command is listed in Computer Activity and announced with a notification. You can end away mode at any time from the 1904 menu, ' +
+      'Each command is listed in Computer Activity and announced with a notification. You can end away mode at any time from Settings, ' +
       'Computer Activity or the dashboard.',
     buttons: ['Cancel', ...COMPUTER_AWAY_MINUTES.map(minutes => DURATION_NAMES[minutes])],
     minutes: [null, ...COMPUTER_AWAY_MINUTES],

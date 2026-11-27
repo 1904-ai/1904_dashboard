@@ -64,8 +64,8 @@ function approvalView({ request, computerName, place, full = false, platform, aw
       {
         id: 'task', label: 'Everything this task asks, for',
         hint: full
-          ? 'Commands from messages you send this task from this computer run without asking, with full access, until the time is up. End it any time from the 1904 menu or Computer Activity.'
-          : 'Sandboxed commands from messages you send this task from this computer run without asking until the time is up. Full access still asks. End it any time from the 1904 menu or Computer Activity.',
+          ? 'Commands from messages you send this task from this computer run without asking, with full access, until the time is up. End it any time from Computer Activity.'
+          : 'Sandboxed commands from messages you send this task from this computer run without asking until the time is up. Full access still asks. End it any time from Computer Activity.',
       },
     ] : []),
   ];
