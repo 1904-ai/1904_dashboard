@@ -1787,7 +1787,7 @@ function showDeploys() {
     return deployWindow;
   }
   const win = new BrowserWindow({
-    title: 'Deploy From This Computer', icon: ICON, width: 720, height: 780, minWidth: 460, minHeight: 420,
+    title: 'Deploy From This Computer', icon: ICON, width: 900, height: 800, minWidth: 520, minHeight: 440,
     backgroundColor: PALETTE[activeTheme()].color, autoHideMenuBar: true, show: false,
     webPreferences: { ...SAFE_PREFERENCES, preload: path.join(__dirname, 'deploy-preload.cjs') },
   });
