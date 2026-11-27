@@ -111,17 +111,19 @@ The build commands produce preview packages. See the [release guide](RELEASING.m
 
 ## Use a signed-in browser tab
 
-In the updated 1904 dashboard, open **Settings → Computers → Task browser**.
+In the updated 1904 dashboard, open **Settings → 1904 Desktop → Task browser**.
 Choose Automatic, This computer, or Cloud browser. The choice is saved on this
 device; it does not silently move an active session.
 
-Choose **Connect browser → Open extension folder**. In Chrome or Edge’s
-extensions page, enable developer mode and load that folder with **Load
-unpacked**. Choose **Connect browser → Copy connection code**, then open the
-extension on the website tab you want to share, paste the code, and select
-**Share this tab**. Approve the task in Desktop when prompted. Cookies stay in
-your browser; visible page content and screenshots go to the task. Existing task
-action approvals and private control still apply.
+Choose **Connect browser** to open 1904 Desktop's guided **Connect your browser**
+window. Follow its three steps: load the `1904-browser-extension` folder once in
+Chrome (`chrome://extensions`) or Edge (`edge://extensions`) with **Developer
+mode → Load unpacked**, copy the pairing code (starts with `1904-`, pasted into
+the extension rather than the address bar), then open **1904 Desktop Browser**
+on the website tab you want to share and select **Share this tab**. Approve the
+task in Desktop when prompted. Cookies stay in your browser; visible page
+content and screenshots go to the task. Existing task action approvals and
+private control still apply.
 
 This first connector shares one public-site tab at a time and stays on its
 origin. Complete cross-origin sign-in before sharing. Reconnect after quitting
