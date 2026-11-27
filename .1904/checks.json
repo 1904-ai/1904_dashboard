@@ -44,6 +44,16 @@
         "test/deploy-window-ui.test.cjs"
       ],
       "automatic": true
+    },
+    {
+      "name": "desktop-approval",
+      "command": [
+        "node",
+        "--test",
+        "test/computer-approval.test.cjs",
+        "test/approval-window-ui.test.cjs"
+      ],
+      "automatic": true
     }
   ]
 }
