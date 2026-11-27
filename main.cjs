@@ -1945,7 +1945,12 @@ function deployState() {
     platform: computerPlatform(),
     connection: { connected: Boolean(info), text: info ? `Connected to 1904 as ${info.name}.${connection.paused ? ' Use My Computer is paused, so nothing from 1904 runs until you resume it.' : ''}` : connection.text },
     // The repository's name goes along so the window can say which checkout the app folder should be. Only a plain name is shown.
-    apps: [...deployApps.values()].map(appRef => ({ id: appRef.id, name: computerPolicy.visibleLine(appRef.name), repo: /^[A-Za-z0-9._-]{1,100}$/.test(appRef.repo ?? '') ? appRef.repo : '' })),
+    apps: [...deployApps.values()].map(appRef => ({
+      id: appRef.id,
+      name: computerPolicy.visibleLine(appRef.name),
+      repo: /^[A-Za-z0-9._-]{1,100}$/.test(appRef.repo ?? '') ? appRef.repo : '',
+      ...(appRef.cloneUrl ? { cloneUrl: appRef.cloneUrl } : {}),
+    })),
     recipes: (deployRecipes?.all() ?? []).map(recipe => computerDeploy.recipeView(recipe, info?.id)),
     // Whether a password or a deploy key is kept for each app, and the key's public half. Never a secret.
     kept: Object.fromEntries([...new Set([...deployApps.keys(), ...(deployRecipes?.all() ?? []).map(recipe => recipe.appId)])].map(appId => {
@@ -2130,7 +2135,14 @@ async function syncDeploys() {
   if (sent.ok && Array.isArray(sent.body?.apps)) {
     deployApps = new Map(sent.body.apps.flatMap(entry => {
       const id = typeof entry?.id === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(entry.id) ? entry.id : undefined;
-      return id ? [[id, { id, name: computerPolicy.label(entry.name) || 'Untitled app', repo: computerPolicy.label(entry.repo) || '' }]] : [];
+      let cloneUrl = '';
+      if (typeof entry?.cloneUrl === 'string' && entry.cloneUrl.length <= 512) {
+        try {
+          const parsed = new URL(entry.cloneUrl.trim());
+          if (parsed.protocol === 'https:' && !parsed.username && !parsed.password) cloneUrl = parsed.toString();
+        } catch { /* ignore invalid cloneUrl */ }
+      }
+      return id ? [[id, { id, name: computerPolicy.label(entry.name) || 'Untitled app', repo: computerPolicy.label(entry.repo) || '', ...(cloneUrl ? { cloneUrl } : {}) }]] : [];
     }));
     deployMessage = sent.body.enabled === false ? computerPolicy.label(sent.body.message, 300) || 'Use My Computer is turned off for your workspace.' : undefined;
     return true;
@@ -2242,6 +2254,11 @@ function installDeployHandlers() {
     if (!isDeploySender(event) || typeof appId !== 'string') return;
     const command = deploySsh.installKeyCommand(deploySecrets?.summary(appId, computerLink?.info()?.id).publicKey);
     if (command) clipboard.writeText(command);
+  });
+  ipcMain.on('1904:deploy-copy-clone-url', (event, appId) => {
+    if (!isDeploySender(event) || typeof appId !== 'string') return;
+    const url = deployApps.get(appId)?.cloneUrl;
+    if (url) clipboard.writeText(url);
   });
   ipcMain.on('1904:secret-answer', (event, nonce, value) => {
     if (!isSecretSender(event) || !secretPending || nonce !== secretPending.nonce) return;
