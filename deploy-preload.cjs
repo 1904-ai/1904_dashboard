@@ -30,6 +30,7 @@ function node(tag, className, text) {
 }
 
 const recipeFor = appId => state.recipes.find(recipe => recipe.appId === appId);
+const appFor = appId => state.apps.find(app => app.id === appId);
 const keptFor = appId => state.kept?.[appId] ?? { password: false, publicKey: '', installCommand: '' };
 const checked = name => document.querySelector(`input[name="${name}"]:checked`)?.value;
 const logMode = () => checked('log') || 'output';
@@ -76,6 +77,9 @@ function showParts() {
   $('local-note').hidden = !(place === 'local' && state.platform === 'windows');
 
   const kept = keptFor(selected);
+  const cloneUrl = appFor(selected)?.cloneUrl || '';
+  $('repo-url-box').hidden = !cloneUrl;
+  $('repo-clone-url').textContent = cloneUrl;
   $('identity-text').textContent = trusted.length
     ? 'You trusted this host. A deploy stops if the host ever shows a different identity.'
     : seen.length ? 'This is what the host shows. Compare it with what its owner gave you, or with the host itself, before you trust it.'
@@ -279,6 +283,10 @@ window.addEventListener('DOMContentLoaded', () => {
   $('copy-install').addEventListener('click', () => {
     ipcRenderer.send('1904:deploy-copy-install', selected);
     say('Copied. Run it on the host as that user.', 'ok');
+  });
+  $('copy-clone-url').addEventListener('click', () => {
+    ipcRenderer.send('1904:deploy-copy-clone-url', selected);
+    say('Copied the repository URL.', 'ok');
   });
   $('save').addEventListener('click', async () => {
     say('Saving…');

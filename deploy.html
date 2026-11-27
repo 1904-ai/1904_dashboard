@@ -81,6 +81,11 @@
           <select id="app"></select>
         </label>
         <p class="hint" id="apps-empty" hidden>No apps to show yet. Apps you can work on in 1904 appear here.</p>
+        <div class="box" id="repo-url-box" hidden>
+          <div class="box-head"><span class="box-title">Repository URL</span><button type="button" id="copy-clone-url">Copy URL</button></div>
+          <pre id="repo-clone-url"></pre>
+          <p class="hint">For 1904-hosted repositories, create a read-only Git deploy token in the app’s Settings → Your code so this host can run <kbd>git pull</kbd>.</p>
+        </div>
         <fieldset>
           <legend>Where the commands run</legend>
           <label class="choice"><input type="radio" name="where" value="host" checked><span>On a host, over SSH</span></label>
