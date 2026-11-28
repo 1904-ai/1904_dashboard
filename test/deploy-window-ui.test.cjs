@@ -372,3 +372,160 @@ test('Deploy window pre-selects a requested app from initial state or 1904:deplo
   assert.equal(ui.$('app').value, 'app_openls');
   assert.equal(ui.$('host-name').value, 'openls.internal');
 });
+
+test('Check again preserves trust when the host key matches, and alerts when the host key changed', async () => {
+  let returnedKeys = [{ line: HOST_KEY, fingerprint: 'ED25519 SHA256:Lh5htTA+sIPvycGXk9UZ' }];
+  const ui = loadDeployWindow({
+    state: baseState({ trusted: true }),
+    async onInvoke(channel) {
+      if (channel === '1904:deploy-check-host') return { ok: true, keys: returnedKeys };
+      return { ok: true };
+    },
+  });
+  await ui.flush();
+
+  assert.equal(ui.$('dry-run').disabled, false);
+  ui.$('check-host').click();
+  await ui.flush();
+  assert.equal(ui.$('trust-host').hidden, true, 'matching host key stays trusted');
+  assert.equal(ui.$('dry-run').disabled, false, 'Dry run stays enabled when host key matches');
+  assert.equal(ui.$('identity-feedback').dataset.kind, 'ok');
+  assert.equal(ui.$('identity-feedback-title').textContent, 'Host identity matches');
+
+  returnedKeys = [{ line: 'openls.internal ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ' + 'y'.repeat(42), fingerprint: 'ED25519 SHA256:ChangedKey' }];
+  ui.$('check-host').click();
+  await ui.flush();
+  assert.equal(ui.$('trust-host').hidden, false, 'changed host key requires re-trust');
+  assert.equal(ui.$('dry-run').disabled, true, 'Dry run disabled until changed key is trusted and saved');
+  assert.equal(ui.$('identity-feedback').dataset.kind, 'error');
+  assert.equal(ui.$('identity-feedback-title').textContent, 'Host identity changed');
+});
+
+test('Leading cd tip moves the path into App folder on the host in one click', async () => {
+  const st = baseState({ trusted: true });
+  st.recipes[0].commands = 'cd /opt/openls\ngit pull\ndocker compose up -d';
+  const ui = loadDeployWindow({ state: st, async onInvoke() { return { ok: true }; } });
+  await ui.flush();
+
+  assert.equal(ui.$('folder-cd-tip').hidden, false);
+  assert.match(ui.$('folder-cd-text').textContent, /cd \/opt\/openls/);
+  assert.equal(ui.$('use-cd-folder').textContent, 'Use /opt/openls');
+
+  ui.$('use-cd-folder').click();
+  assert.equal(ui.$('folder').value, '/opt/openls');
+  assert.equal(ui.$('commands').value, 'git pull\ndocker compose up -d');
+  assert.equal(ui.$('folder-cd-tip').hidden, true);
+  assert.match(ui.$('status').textContent, /Moved \/opt\/openls/);
+});
+
+test('Dry run and Run now stay busy until result arrives, show actionable hint, and wire Copy output and Computer Activity', async () => {
+  const ui = loadDeployWindow({ state: baseState({ trusted: true }), async onInvoke() { return { ok: true }; } });
+  await ui.flush();
+
+  ui.$('dry-run').click();
+  await ui.flush();
+  assert.equal(ui.$('dry-run').disabled, true, 'stays disabled while dry run executes on host');
+  assert.equal(ui.$('run').disabled, true, 'Run now also disabled while dry run executes');
+  assert.equal(ui.$('dry-run').getAttribute('aria-busy'), 'true');
+  assert.equal(ui.$('dry-run-label').textContent, 'Checking…');
+
+  ui.emit('1904:deploy-dry-run-result', {
+    appId: 'app_openls',
+    ok: false,
+    status: 'failed',
+    exitCode: 1,
+    message: 'The commands ended with exit code 1: CANNOT PULL',
+    hint: 'Deploys run without a terminal, so git on the host cannot prompt for a username or password.',
+    output: 'CANNOT PULL: the host could not read origin without a password',
+  });
+  assert.equal(ui.$('dry-run').disabled, false, 're-enabled once result arrives');
+  assert.equal(ui.$('dry-run').getAttribute('aria-busy'), 'false');
+  assert.equal(ui.$('dry-run-label').textContent, 'Dry run');
+  assert.equal(ui.$('run-feedback-hint').hidden, false);
+  assert.match(ui.$('run-feedback-hint').textContent, /without a terminal/);
+  assert.equal(ui.$('output-wrap').hidden, false);
+
+  ui.$('copy-output').click();
+  assert.equal(ui.sent.at(-1).channel, '1904:deploy-copy-output');
+  assert.match(ui.sent.at(-1).args[0], /CANNOT PULL/);
+  assert.equal(ui.$('copy-output').textContent, 'Copied');
+  ui.runTimers();
+  assert.equal(ui.$('copy-output').textContent, 'Copy output');
+
+  ui.$('open-activity').click();
+  assert.equal(ui.sent.at(-1).channel, '1904:deploy-open-activity');
+  ui.$('open-activity-header').click();
+  assert.equal(ui.sent.at(-1).channel, '1904:deploy-open-activity');
+});
+
+test('Failed Dry run with gitAuth opens inline Fix git sign-in assistant for HTTPS and SSH, and re-runs Dry run on verify', async () => {
+  const ui = loadDeployWindow({
+    state: baseState({ trusted: true }),
+    async onInvoke(channel) {
+      if (channel === '1904:deploy-git-auth-https') return { ok: true };
+      if (channel === '1904:deploy-git-auth-ssh') return { ok: true, publicKey: KEY, fetchOk: false };
+      return { ok: true };
+    },
+  });
+  await ui.flush();
+
+  assert.equal(ui.$('git-auth-box').hidden, true);
+  ui.emit('1904:deploy-dry-run-result', {
+    appId: 'app_openls',
+    ok: false,
+    status: 'failed',
+    exitCode: 1,
+    message: 'CANNOT PULL',
+    gitAuth: { needsAuth: true, folder: '/opt/openls', origin: 'http://192.168.2.100:3000/adam/openls.git', scheme: 'https', httpHost: '192.168.2.100:3000' },
+    output: 'CANNOT PULL: the host could not read origin without a password',
+  });
+  assert.equal(ui.$('git-auth-box').hidden, false);
+  assert.match(ui.$('git-auth-target').textContent, /\/opt\/openls.*192\.168\.2\.100:3000/);
+  assert.equal(ui.$('git-https-panel').hidden, false);
+  assert.equal(ui.$('git-ssh-panel').hidden, true);
+  assert.equal(ui.$('git-save-https').disabled, true, 'disabled until username and token are entered');
+
+  ui.$('git-username').value = 'adam';
+  ui.$('git-token').value = 'tok-123';
+  ui.$('form').dispatchEvent({ type: 'input' });
+  assert.equal(ui.$('git-save-https').disabled, false);
+
+  ui.$('git-save-https').click();
+  assert.equal(ui.$('git-token').value, '', 'token cleared immediately on submit');
+  await ui.flush();
+
+  const httpsCall = ui.invoked.find(call => call.channel === '1904:deploy-git-auth-https');
+  assert.deepEqual(JSON.parse(JSON.stringify(httpsCall.args)), ['app_openls', { folder: '/opt/openls', origin: 'http://192.168.2.100:3000/adam/openls.git', username: 'adam', token: 'tok-123' }]);
+  assert.equal(ui.$('git-auth-feedback').dataset.kind, 'ok');
+  assert.equal(ui.$('git-auth-feedback-title').textContent, 'Git sign-in verified');
+  assert.ok(ui.invoked.some(call => call.channel === '1904:deploy-dry-run'), 'automatically re-runs Dry run after credentials verify');
+
+  // When the follow-up Dry run passes, the assistant hides cleanly.
+  ui.emit('1904:deploy-dry-run-result', { appId: 'app_openls', ok: true, status: 'done', exitCode: 0, output: 'Nothing found that would stop a deploy.' });
+  assert.equal(ui.$('git-auth-box').hidden, true);
+
+  // SSH remote opens in SSH mode, displays the generated public key, and copies it safely.
+  ui.emit('1904:deploy-dry-run-result', {
+    appId: 'app_openls',
+    ok: false,
+    status: 'failed',
+    exitCode: 1,
+    gitAuth: { needsAuth: true, folder: '/opt/openls', origin: 'git@github.com:org/openls.git', scheme: 'ssh', httpHost: '' },
+    output: 'CANNOT PULL',
+  });
+  assert.equal(ui.$('git-auth-box').hidden, false);
+  assert.equal(ui.$('git-https-panel').hidden, true);
+  assert.equal(ui.$('git-ssh-panel').hidden, false);
+  assert.equal(ui.$('git-ssh-remote-row').hidden, true, 'already SSH remote hides optional remote override');
+
+  ui.$('git-make-ssh-key').click();
+  await ui.flush();
+  assert.equal(ui.$('git-ssh-key-result').hidden, false);
+  assert.equal(ui.$('git-ssh-pubkey').textContent, KEY);
+
+  ui.$('copy-git-pubkey').click();
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.sent.at(-1))), { channel: '1904:deploy-copy-pubkey', args: [KEY] });
+  assert.equal(ui.$('copy-git-pubkey').textContent, 'Copied to clipboard');
+  ui.runTimers();
+  assert.equal(ui.$('copy-git-pubkey').textContent, 'Copy public key');
+});
