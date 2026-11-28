@@ -1440,7 +1440,7 @@ function approvalWindowNow() {
   const palette = PALETTE[activeTheme()];
   const parent = computerParent();
   const win = new BrowserWindow({
-    title: 'Use My Computer', icon: ICON, width: 580, height: 640, minWidth: 460, minHeight: 360,
+    title: 'Use My Computer', icon: ICON, width: 720, height: 680, minWidth: 520, minHeight: 400,
     parent: parent && !parent.isDestroyed() ? parent : undefined, modal: false, show: false,
     minimizable: false, maximizable: false, fullscreenable: false, backgroundColor: palette.color,
     titleBarStyle: 'hidden',
@@ -1523,7 +1523,8 @@ function onApprovalSize(event, height) {
   if (!isApprovalSender(event) || !Number.isFinite(height)) return;
   const area = screen.getDisplayMatching(approvalWindow.getBounds()).workArea;
   const [width] = approvalWindow.getContentSize();
-  approvalWindow.setContentSize(width, Math.round(Math.min(area.height * 0.9, Math.max(360, height))));
+  const maxWidth = Math.max(460, Math.round(area.width * 0.92));
+  approvalWindow.setContentSize(Math.min(width, maxWidth), Math.round(Math.min(area.height * 0.9, Math.max(400, height))));
 }
 
 function computerFolders() {

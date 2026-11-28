@@ -16,6 +16,10 @@ let shownAt = 0;
 let focusedAt = 0;
 let armTimer;
 let seenEnd = false;
+let everOverflowed = false;
+let maxViewedPct = 0;
+let totalLines = 1;
+let runLabel = 'Run';
 
 const $ = id => document.getElementById(id);
 
@@ -26,15 +30,62 @@ function node(tag, className, text) {
   return element;
 }
 
+function lineWord(count) {
+  return count === 1 ? '1 line' : `${count} lines`;
+}
+
 function armed() {
   return Boolean(current) && document.hasFocus() && Date.now() - Math.max(shownAt, focusedAt) >= ARM_MS && seenEnd;
+}
+
+function syncReviewIndicators() {
+  const state = !seenEnd ? 'pending' : everOverflowed ? 'done' : 'fit';
+  const commandBox = $('command-box');
+  commandBox.dataset.review = state;
+  const pill = $('review-pill');
+  pill.dataset.state = state;
+  const pillText = $('review-pill-text');
+  const bar = $('scroll-hint');
+  const barText = $('scroll-hint-text');
+  const progress = $('scroll-progress');
+  if (state === 'pending') {
+    pillText.textContent = `Scroll to review · ${lineWord(totalLines)}`;
+    bar.hidden = false;
+    barText.textContent = `Scroll to the end of the command to enable ${runLabel}`;
+    progress.textContent = `${maxViewedPct}% viewed`;
+    bar.style?.setProperty?.('--review-pct', `${maxViewedPct}%`);
+  } else if (state === 'done') {
+    pillText.textContent = `All ${lineWord(totalLines)} viewed`;
+    bar.hidden = false;
+    barText.textContent = 'Whole command viewed';
+    progress.textContent = '100%';
+    bar.style?.setProperty?.('--review-pct', '100%');
+  } else {
+    pillText.textContent = lineWord(totalLines);
+    bar.hidden = true;
+    progress.textContent = '';
+  }
 }
 
 function refreshRun() {
   clearTimeout(armTimer);
   const run = $('run');
-  run.disabled = !armed();
-  $('scroll-hint').hidden = seenEnd;
+  const ready = armed();
+  run.disabled = !ready;
+  $('away').disabled = !ready;
+  syncReviewIndicators();
+
+  const needsScroll = Boolean(current) && !seenEnd;
+  const gate = $('run-gate');
+  gate.hidden = !needsScroll;
+  if (needsScroll) {
+    run.setAttribute('aria-describedby', 'run-gate');
+    run.title = `Scroll to the end of the command to enable ${runLabel}`;
+  } else {
+    run.removeAttribute('aria-describedby');
+    run.title = '';
+  }
+
   if (current && !run.disabled) return;
   if (current && document.hasFocus() && seenEnd) {
     armTimer = setTimeout(refreshRun, Math.max(50, ARM_MS - (Date.now() - Math.max(shownAt, focusedAt))));
@@ -43,7 +94,20 @@ function refreshRun() {
 
 function checkScrolled() {
   const box = $('command');
-  if (box.scrollHeight - box.clientHeight - box.scrollTop <= 2) seenEnd = true;
+  const overflow = box.scrollHeight - box.clientHeight;
+  if (overflow > 2) {
+    everOverflowed = true;
+    if (overflow - box.scrollTop <= 2) {
+      seenEnd = true;
+      maxViewedPct = 100;
+    } else if (!seenEnd) {
+      const pct = box.scrollHeight > 0 ? Math.round(((box.scrollTop + box.clientHeight) / box.scrollHeight) * 100) : 1;
+      maxViewedPct = Math.max(maxViewedPct, Math.min(99, Math.max(1, pct)));
+    }
+  } else {
+    seenEnd = true;
+    if (everOverflowed) maxViewedPct = 100;
+  }
   refreshRun();
 }
 
@@ -101,13 +165,21 @@ function render({ nonce, view, theme, platform, icon }) {
   if (typeof icon === 'string' && icon.startsWith('data:image/png;base64,')) $('logo').src = icon;
   document.title = view.title;
   $('heading').textContent = view.heading;
-  $('fields').replaceChildren(...view.fields.flatMap(field => [node('dt', '', field.name), node('dd', 'them', field.text)]));
+  $('fields').replaceChildren(...view.fields.map(field => {
+    const item = node('div', 'meta-item');
+    item.append(node('dt', '', field.name), node('dd', 'them', field.text));
+    return item;
+  }));
 
   const full = view.access === 'full';
   $('access').textContent = full ? 'Full access' : 'Sandboxed';
   $('access').dataset.access = view.access;
-  $('command').replaceChildren(...view.command.split('\n').map(line => node('span', 'line', line)));
-  $('command').scrollTop = 0;
+  const lines = view.command.split('\n');
+  totalLines = lines.length;
+  const commandBox = $('command');
+  commandBox.dataset.multiline = lines.length > 1 ? 'true' : 'false';
+  commandBox.replaceChildren(...lines.map(line => node('span', 'line', line)));
+  commandBox.scrollTop = 0;
 
   $('folder').hidden = view.folder.outside;
   $('outside').hidden = !view.folder.outside;
@@ -117,10 +189,13 @@ function render({ nonce, view, theme, platform, icon }) {
   } else {
     $('folder-path').textContent = view.folder.path;
   }
-  $('reason').hidden = !view.reason;
+  $('reason-box').hidden = !view.reason;
   $('reason').textContent = view.reason;
   $('unusual').hidden = view.unusual.length === 0;
   $('unusual-list').replaceChildren(...view.unusual.map(line => node('li', 'them', line)));
+  const notesBox = $('notes-box');
+  notesBox.hidden = view.notes.length === 0;
+  notesBox.dataset.access = view.access;
   $('notes').dataset.access = view.access;
   $('notes').replaceChildren(...view.notes.map(line => node('li', '', line)));
   $('network-row').hidden = !view.network;
@@ -129,15 +204,20 @@ function render({ nonce, view, theme, platform, icon }) {
   $('away').hidden = !view.away;
 
   const run = $('run');
+  runLabel = view.run;
   run.textContent = view.run;
   run.dataset.access = view.access;
   shownAt = Date.now();
   seenEnd = false;
+  everOverflowed = false;
+  maxViewedPct = 0;
   // Decline has the focus: Enter or Space pressed by habit never runs anything.
   $('decline').focus();
   requestAnimationFrame(() => {
     checkScrolled();
-    ipcRenderer.send('1904:approval-size', Math.ceil(document.querySelector('main').scrollHeight + 40 + 64));
+    const barH = document.querySelector('.bar')?.offsetHeight || 40;
+    const footerH = document.querySelector('footer')?.offsetHeight || 64;
+    ipcRenderer.send('1904:approval-size', Math.ceil(document.querySelector('main').scrollHeight + barH + footerH));
   });
 }
 
@@ -157,6 +237,10 @@ window.addEventListener('DOMContentLoaded', () => {
   $('decline').addEventListener('click', () => answer('decline'));
   $('choose-folder').addEventListener('click', () => answer('folder'));
   $('away').addEventListener('click', () => answer('away'));
+  $('run-gate').addEventListener('click', () => {
+    $('command-box').scrollIntoView?.({ block: 'nearest' });
+    $('command').focus();
+  });
   $('command').addEventListener('scroll', checkScrolled, { passive: true });
   window.addEventListener('resize', checkScrolled);
   document.addEventListener('keydown', event => {

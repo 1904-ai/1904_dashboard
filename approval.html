@@ -6,103 +6,206 @@
   <title>Use My Computer</title>
   <style>
     :root { color-scheme: dark; --canvas: #121416; --panel: #181b1e; --raised: #1f2327; --text: #e2e7ec; --muted: #9aa5b0; --line: #ffffff18;
-      --hover: #ffffff14; --edge: #ffffff38; --code: #0b0d0f; --warn: #d9a441; --warn-bg: #d9a4411a; --bad: #e5706b; --bad-bg: #e5706b1f;
-      --ok: #5cc489; --primary: #e2e7ec; --on-primary: #121416; --danger: #d9534f; --on-danger: #ffffff; --focus: #7aa7ff; }
-    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --panel: #ffffff; --raised: #ffffff; --text: #20262d; --muted: #59636e; --line: #00000016;
-      --hover: #0000000c; --edge: #00000030; --code: #eef1f4; --warn: #8a5d00; --warn-bg: #f5c34d26; --bad: #b42318; --bad-bg: #b423180f;
-      --ok: #1f7a46; --primary: #20262d; --on-primary: #ffffff; --danger: #c0372f; --on-danger: #ffffff; --focus: #2f6fe0; }
+      --hover: #ffffff14; --edge: #ffffff34; --code: #0b0d0f; --line-num: #9aa5b058;
+      --warn: #e0ae48; --warn-bg: #d9a4411a; --warn-edge: #d9a44166;
+      --bad: #e87a75; --bad-bg: #e5706b18; --bad-edge: #e5706b54;
+      --ok: #5cc489; --ok-bg: #5cc48918; --ok-edge: #5cc48952;
+      --primary: #e2e7ec; --on-primary: #121416; --danger: #d9534f; --on-danger: #ffffff; --focus: #7aa7ff; }
+    :root[data-theme="light"] { color-scheme: light; --canvas: #f6f8fa; --panel: #ffffff; --raised: #f0f3f6; --text: #20262d; --muted: #59636e; --line: #00000016;
+      --hover: #0000000c; --edge: #00000030; --code: #eef1f4; --line-num: #59636e70;
+      --warn: #8a5d00; --warn-bg: #f5c34d26; --warn-edge: #8a5d0055;
+      --bad: #b42318; --bad-bg: #b423180f; --bad-edge: #b423184a;
+      --ok: #1f7a46; --ok-bg: #1f7a4612; --ok-edge: #1f7a464a;
+      --primary: #20262d; --on-primary: #ffffff; --danger: #c0372f; --on-danger: #ffffff; --focus: #2f6fe0; }
     * { box-sizing: border-box; }
     html, body { height: 100%; }
-    body { margin: 0; display: flex; flex-direction: column; background: var(--canvas); color: var(--text); font: 400 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { margin: 0; display: flex; flex-direction: column; background: var(--canvas); color: var(--text); font: 400 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
     /* Every text that came from 1904 or the agent keeps its own direction, so it cannot reorder the prompt around it. */
     .them { direction: ltr; unicode-bidi: isolate; overflow-wrap: anywhere; }
-    .bar { flex: none; height: 40px; display: flex; align-items: center; gap: 9px; padding: 0 16px; -webkit-app-region: drag; user-select: none;
+    [hidden] { display: none !important; }
+    .bar { flex: none; height: 40px; display: flex; align-items: center; gap: 9px; padding: 0 20px; -webkit-app-region: drag; user-select: none;
       border-bottom: 1px solid var(--line); }
     :root[data-platform="macos"] .bar { padding-left: 84px; }
+    :root[data-platform="windows"] .bar { padding-right: 52px; }
     .bar img { width: 20px; height: 20px; border-radius: 5px; }
-    .bar span { font-weight: 650; font-size: 12px; letter-spacing: .01em; }
-    main { flex: 1 1 auto; overflow: auto; padding: 16px 20px 8px; }
-    h1 { margin: 0 0 12px; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
-    dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0 0 14px; }
-    dt { color: var(--muted); }
-    dd { margin: 0; font-weight: 550; min-width: 0; }
-    .label { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
-    .chip { font-size: 10.5px; font-weight: 650; letter-spacing: .02em; text-transform: none; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
-    .chip[data-access="sandbox"] { color: var(--ok); }
-    .chip[data-access="full"] { color: var(--bad); }
-    pre { margin: 0; max-height: 260px; overflow: auto; padding: 10px 12px; border-radius: 8px; background: var(--code); border: 1px solid var(--line);
-      font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; tab-size: 4; }
-    pre .line { display: block; direction: ltr; unicode-bidi: isolate; overflow-wrap: anywhere; min-height: 1.5em; }
-    .hint { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
-    .hint[hidden], [hidden] { display: none !important; }
-    .folder { margin: 12px 0 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-    .folder code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); }
-    .outside { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--bad); background: var(--bad-bg); }
-    .outside code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .reason { margin: 12px 0 0; padding-left: 10px; border-left: 2px solid var(--edge); color: var(--text); }
-    .reason::before { content: "The agent says"; display: block; font-size: 11px; color: var(--muted); }
-    .unusual { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--warn); background: var(--warn-bg); }
-    .unusual strong { display: block; margin-bottom: 4px; }
-    .unusual ul, .notes { margin: 0; padding-left: 18px; }
-    .notes { margin: 12px 0 0; color: var(--muted); }
-    .notes[data-access="full"] { color: var(--bad); }
-    .network { display: flex; gap: 8px; align-items: center; margin: 12px 0 0; }
-    fieldset { margin: 14px 0 4px; padding: 0; border: 0; }
+    .bar span { font-weight: 650; font-size: 12.5px; letter-spacing: .01em; }
+    main { flex: 1 1 auto; overflow: auto; padding: 14px 24px 12px; display: flex; flex-direction: column; gap: 10px; }
+    h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -.015em; }
+    .meta { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr); margin: 0;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .meta-item { padding: 7px 12px; min-width: 0; }
+    .meta-item + .meta-item { border-left: 1px solid var(--line); }
+    .meta dt { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+    .meta dd { margin: 0; font-size: 13.5px; font-weight: 600; color: var(--text); min-width: 0; }
+    .command-section { display: flex; flex-direction: column; gap: 6px; }
+    .label-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .label-title { font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+    .chip { display: inline-flex; align-items: center; font-size: 11px; font-weight: 650; letter-spacing: .01em; padding: 2px 9px; border-radius: 999px; border: 1px solid currentColor; }
+    .chip[data-access="sandbox"] { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-edge); }
+    .chip[data-access="full"] { color: var(--bad); background: var(--bad-bg); border-color: var(--bad-edge); }
+    .review-pill { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px;
+      border: 1px solid var(--line); background: var(--panel); color: var(--muted); font-variant-numeric: tabular-nums; }
+    .review-pill svg { width: 13px; height: 13px; flex: none; display: none; }
+    .review-pill[data-state="pending"] { border-color: var(--warn-edge); background: var(--warn-bg); color: var(--warn); }
+    .review-pill[data-state="pending"] .pill-icon-pending { display: block; }
+    .review-pill[data-state="done"] { border-color: var(--ok-edge); background: var(--ok-bg); color: var(--ok); }
+    .review-pill[data-state="done"] .pill-icon-done { display: block; }
+    .command-box { border-radius: 9px; border: 1px solid var(--line); background: var(--code); overflow: hidden; }
+    .command-box[data-review="pending"] { border-color: var(--warn-edge); }
+    .command-wrap { position: relative; }
+    pre { margin: 0; max-height: 224px; overflow: auto; padding: 10px 14px;
+      font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; tab-size: 4; }
+    pre:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+    pre .line { display: block; direction: ltr; unicode-bidi: isolate; overflow-wrap: anywhere; min-height: 1.55em; }
+    pre[data-multiline="true"] { counter-reset: line; }
+    pre[data-multiline="true"] .line { position: relative; padding-left: 3em; }
+    pre[data-multiline="true"] .line::before { counter-increment: line; content: counter(line); position: absolute; left: 0; width: 2.2em; text-align: right;
+      color: var(--line-num); user-select: none; font-variant-numeric: tabular-nums; }
+    .command-fade { display: none; position: absolute; left: 0; right: 14px; bottom: 0; height: 34px;
+      background: linear-gradient(to bottom, transparent, var(--code) 92%); pointer-events: none; }
+    .command-box[data-review="pending"] .command-fade { display: block; }
+    .review-bar { position: relative; display: flex; align-items: center; gap: 8px; padding: 8px 13px; font-size: 12.5px; font-weight: 550;
+      border-top: 1px solid var(--warn-edge); background: var(--warn-bg); color: var(--warn); }
+    .review-bar::before { content: ""; position: absolute; top: 0; left: 0; height: 2px; width: var(--review-pct, 0%); background: var(--warn); }
+    .review-bar svg { width: 15px; height: 15px; flex: none; display: none; }
+    .command-box[data-review="pending"] .review-icon-pending { display: block; }
+    .command-box[data-review="done"] .review-icon-done { display: block; }
+    .command-box[data-review="done"] .review-bar { border-top-color: var(--line); background: var(--panel); color: var(--ok); }
+    .command-box[data-review="done"] .review-bar::before { width: 100%; background: var(--ok); opacity: .55; }
+    .review-progress { margin-left: auto; font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .folder { margin: 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+    .folder svg { width: 15px; height: 15px; color: var(--muted); flex: none; }
+    .folder-label { color: var(--muted); font-weight: 550; }
+    .folder code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text);
+      background: var(--panel); border: 1px solid var(--line); padding: 2px 8px; border-radius: 6px; }
+    .outside { margin: 0; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--bad-edge); background: var(--bad-bg);
+      display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.5; }
+    .outside svg { width: 16px; height: 16px; color: var(--bad); flex: none; margin-top: 2px; }
+    .outside-body { min-width: 0; }
+    .outside strong { color: var(--bad); }
+    .outside code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .reason { position: relative; overflow: hidden; margin: 0; padding: 9px 13px 9px 16px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); }
+    .reason::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--edge); }
+    .reason-label { display: block; font-size: 11px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+    .reason-text { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--text); }
+    .unusual { margin: 0; padding: 9px 13px; border-radius: 8px; border: 1px solid var(--warn-edge); background: var(--warn-bg); font-size: 13px; }
+    .unusual strong { display: block; margin-bottom: 4px; color: var(--warn); }
+    .unusual ul { margin: 0; padding-left: 18px; }
+    .notes-box { display: flex; align-items: flex-start; gap: 10px; padding: 9px 13px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); }
+    .notes-box[data-access="full"] { border-color: var(--bad-edge); background: var(--bad-bg); }
+    .notes-box svg { width: 16px; height: 16px; flex: none; margin-top: 2px; display: none; }
+    .notes-box[data-access="full"] .notes-icon-full { display: block; color: var(--bad); }
+    .notes-box[data-access="sandbox"] .notes-icon-sandbox { display: block; color: var(--ok); }
+    .notes { margin: 0; padding-left: 16px; display: grid; gap: 3px; font-size: 13px; line-height: 1.45; color: var(--text); }
+    .notes-box[data-access="full"] .notes li::marker { color: var(--bad); }
+    .notes-box[data-access="sandbox"] .notes li::marker { color: var(--ok); }
+    .network { display: flex; gap: 9px; align-items: center; margin: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--panel); cursor: pointer; font-size: 13.5px; font-weight: 550; }
+    .network input { margin: 0; accent-color: var(--focus); }
+    fieldset { margin: 2px 0 0; padding: 0; border: 0; }
     legend { padding: 0; margin: 0 0 6px; font-size: 11px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
-    .scope { display: grid; grid-template-columns: auto 1fr; gap: 0 9px; align-items: start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+    .scope { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px;
       background: var(--panel); cursor: pointer; }
-    .scope + .scope { margin-top: 6px; }
+    .scope + .scope { margin-top: 5px; }
+    .scope:hover { background: var(--raised); }
     .scope:has(input:checked) { border-color: var(--edge); background: var(--raised); }
-    .scope input { margin: 2px 0 0; }
-    .scope-title { font-weight: 550; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .scope-hint { grid-column: 2; color: var(--muted); font-size: 12px; }
-    select { font: inherit; color: inherit; background: var(--canvas); border: 1px solid var(--edge); border-radius: 6px; padding: 1px 6px; }
-    footer { flex: none; display: flex; align-items: center; gap: 10px; padding: 12px 20px 14px; border-top: 1px solid var(--line); background: var(--canvas); }
+    .scope input { margin: 3px 0 0; accent-color: var(--focus); }
+    .scope-title { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .scope-hint { grid-column: 2; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+    select { font: 550 12.5px system-ui, -apple-system, "Segoe UI", sans-serif; color: inherit; background: var(--canvas); border: 1px solid var(--edge); border-radius: 6px; padding: 2px 8px; }
+    footer { flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 24px 12px; border-top: 1px solid var(--line); background: var(--canvas); }
     .links { display: flex; gap: 4px; margin-right: auto; flex-wrap: wrap; }
-    button { font: 600 13px system-ui, -apple-system, "Segoe UI", sans-serif; color: inherit; background: transparent; border: 1px solid var(--edge);
-      border-radius: 7px; padding: 6px 14px; cursor: pointer; }
+    .footer-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+    button { font: 600 13.5px system-ui, -apple-system, "Segoe UI", sans-serif; color: inherit; background: transparent; border: 1px solid var(--edge);
+      border-radius: 7px; padding: 7px 15px; cursor: pointer; }
     button:hover:not(:disabled) { background: var(--hover); }
     button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-    button.link { border-color: transparent; color: var(--muted); padding: 6px 8px; font-weight: 550; }
-    button.link:hover { color: var(--text); }
+    button.link { border-color: transparent; color: var(--muted); padding: 7px 8px; font-weight: 550; }
+    button.link:hover:not(:disabled) { color: var(--text); }
+    button.run-gate { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--warn);
+      background: var(--warn-bg); border: 1px solid var(--warn-edge); border-radius: 6px; padding: 5px 10px; }
+    button.run-gate:hover:not(:disabled) { background: var(--warn-bg); filter: brightness(1.1); }
+    button.run-gate svg { width: 13px; height: 13px; flex: none; }
     button.primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); min-width: 96px; }
     button.primary:hover:not(:disabled) { background: var(--primary); filter: brightness(1.12); }
     button.primary[data-access="full"] { background: var(--danger); border-color: var(--danger); color: var(--on-danger); }
-    button:disabled { opacity: .45; cursor: default; }
-    @media (forced-colors: active) { pre, .scope, .outside, .unusual { border: 1px solid CanvasText; } }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    @media (max-width: 560px) {
+      .meta { grid-template-columns: 1fr; }
+      .meta-item + .meta-item { border-left: 0; border-top: 1px solid var(--line); }
+    }
+    @media (forced-colors: active) { .meta, .command-box, .review-bar, .scope, .outside, .unusual, .reason, .notes-box, .network, button.run-gate { border: 1px solid CanvasText; } }
   </style>
 </head>
 <body>
   <div class="bar"><img id="logo" alt=""><span>Use My Computer</span></div>
   <main>
     <h1 id="heading" class="them"></h1>
-    <dl id="fields"></dl>
-    <section aria-labelledby="command-label">
-      <p class="label" id="command-label">Command <span class="chip" id="access"></span></p>
-      <pre id="command" tabindex="0" aria-labelledby="command-label"></pre>
-      <p class="hint" id="scroll-hint" hidden>Scroll to the end of the command to run it.</p>
+    <dl class="meta" id="fields"></dl>
+    <section class="command-section" aria-labelledby="command-label">
+      <div class="label-row">
+        <span class="label-title" id="command-label">Command</span>
+        <span class="chip" id="access"></span>
+        <span class="review-pill" id="review-pill" data-state="fit">
+          <svg class="pill-icon-pending" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.5v9"/><path d="M4.5 9.2 8 12.7l3.5-3.5"/></svg>
+          <svg class="pill-icon-done" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 5"/></svg>
+          <span id="review-pill-text"></span>
+        </span>
+      </div>
+      <div class="command-box" id="command-box" data-review="fit">
+        <div class="command-wrap">
+          <pre id="command" tabindex="0" aria-labelledby="command-label"></pre>
+          <div class="command-fade" aria-hidden="true"></div>
+        </div>
+        <div class="review-bar" id="scroll-hint" role="status" aria-live="polite" hidden>
+          <svg class="review-icon-pending" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.5v9"/><path d="M4.5 9.2 8 12.7l3.5-3.5"/></svg>
+          <svg class="review-icon-done" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.2 7.2 10.2 10.8 6"/></svg>
+          <span id="scroll-hint-text">Scroll to the end of the command to run it.</span>
+          <span class="review-progress" id="scroll-progress"></span>
+        </div>
+      </div>
     </section>
-    <p class="folder" id="folder" hidden><span>Folder</span> <code class="them" id="folder-path"></code></p>
-    <div class="outside" id="outside" hidden>
-      <strong>This command starts outside the app’s folder, in:</strong><br><code class="them" id="outside-path"></code><br>
-      <span>The app’s folder is </span><code class="them" id="outside-root"></code>
+    <div class="folder" id="folder" hidden>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.4 1.5h4.6A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>
+      <span class="folder-label">Folder</span>
+      <code class="them" id="folder-path"></code>
     </div>
-    <p class="reason them" id="reason" hidden></p>
+    <div class="outside" id="outside" hidden>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.3 14 13H2z"/><path d="M8 6.5v3.1"/><circle cx="8" cy="11.3" r=".55" fill="currentColor" stroke="none"/></svg>
+      <div class="outside-body">
+        <strong>This command starts outside the app’s folder, in:</strong><br><code class="them" id="outside-path"></code><br>
+        <span>The app’s folder is </span><code class="them" id="outside-root"></code>
+      </div>
+    </div>
+    <div class="reason" id="reason-box" hidden>
+      <span class="reason-label">The agent says</span>
+      <p class="reason-text them" id="reason"></p>
+    </div>
     <div class="unusual" id="unusual" hidden>
       <strong>Check these characters. They are not plain ASCII, and some look like other letters:</strong>
       <ul id="unusual-list"></ul>
     </div>
-    <ul class="notes" id="notes"></ul>
+    <div class="notes-box" id="notes-box" data-access="sandbox" hidden>
+      <svg class="notes-icon-full" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.3 14 13H2z"/><path d="M8 6.5v3.1"/><circle cx="8" cy="11.3" r=".55" fill="currentColor" stroke="none"/></svg>
+      <svg class="notes-icon-sandbox" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2 13 4.2v3.7c0 3-2.1 5.1-5 6-2.9-.9-5-3-5-6V4.2z"/><path d="M5.7 8.1 7.3 9.7 10.5 6.4"/></svg>
+      <ul class="notes" id="notes"></ul>
+    </div>
     <label class="network" id="network-row" hidden><input type="checkbox" id="network"> Allow internet access for this command</label>
-    <fieldset id="scopes"><legend>When you run it, also allow</legend></fieldset>
+    <fieldset id="scopes"><legend>Allow</legend></fieldset>
   </main>
   <footer>
     <div class="links">
       <button type="button" class="link" id="choose-folder">Choose folder…</button>
       <button type="button" class="link" id="away" hidden>Allow while I’m away…</button>
     </div>
-    <button type="button" id="decline">Decline</button>
-    <button type="button" class="primary" id="run" disabled>Run</button>
+    <div class="footer-actions">
+      <button type="button" class="run-gate" id="run-gate" hidden>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.5v9"/><path d="M4.5 9.2 8 12.7l3.5-3.5"/></svg>
+        <span id="run-gate-text">Review full command first</span>
+      </button>
+      <button type="button" id="decline">Decline</button>
+      <button type="button" class="primary" id="run" disabled>Run</button>
+    </div>
   </footer>
 </body>
 </html>
